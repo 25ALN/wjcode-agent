@@ -1,0 +1,70 @@
+# Environment and local secrets
+.env
+.env.*
+!.env.example
+venv/
+.venv/
+env/
+ENV/
+
+# Python cache and build artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# Test files and test caches
+test_*.py
+*_test.py
+tests/
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+.tox/
+.nox/
+
+# Runtime state and logs
+memory_long.json
+*.log
+logs/
+*.tmp
+*.temp
+
+# Binary and archive files
+*.bin
+*.dat
+*.db
+*.sqlite
+*.sqlite3
+*.pkl
+*.pickle
+*.pt
+*.pth
+*.onnx
+*.so
+*.dll
+*.dylib
+*.exe
+*.o
+*.a
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.rar
+*.7z
+
+# OS and editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
