@@ -1,6 +1,6 @@
 # Coder Agent 项目规划文档（类 Claude Code）
 
-当前检查日期：2026-06-11
+当前检查日期：2026-06-16
 
 ## 一、项目定位
 
@@ -8,21 +8,23 @@
 
 核心目标：
 
-- 理解用户编程意图，自主规划任务。
+- 理解用户编程意图，按任务复杂度选择执行策略。
+- 简单问题使用 ReAct 工具循环快速处理。
+- 复杂问题使用 Planning + ReAct：先规划，再执行，执行过程中根据工具观察继续重规划。
 - 优先通过工具搜索、阅读、编写项目代码（Tool-first，而不是 RAG-first）。
-- 执行代码并根据结果修正，形成“写 -> 跑 -> 看结果”的闭环。
+- 执行代码并根据结果修正，形成“写 -> 跑 -> 看结果 -> 调整计划”的闭环。
 - 具备任务拆解与进度追踪（TodoList）。
 - 自动压缩上下文，避免长对话撑爆上下文窗口（Context Compression）。
 - 对高风险工具执行权限分级管理（Permission System）。
 - 自动读取项目级 AGENT.md，理解项目规则（Project Context）。
 
-设计重点仍然是：Agent Loop 本身并不复杂，真正困难的是 Context Management、Tool System、Permission System、Memory System。
+设计重点仍然是：Agent Loop 本身不复杂，真正困难的是 Context Management、Tool System、Permission System、Memory System，以及复杂任务下的 Planning 状态管理。
 
 ## 二、七层设计与当前状态
 
-### 1. Agent Loop（ReAct 循环）- 基础完成，需增强稳定性
+### 1. Agent Loop（ReAct 循环）- 已完成
 
-当前 `core/runtime.py` 已实现 Function Calling 循环：
+当前 `core/runtime/agent_runtime.py` 已实现 Function Calling 循环，并通过 `core.runtime` 保持旧导入兼容：
 
 ```text
 Thought -> Action(tool call) -> Observation(tool result) -> ... -> Answer
@@ -32,70 +34,103 @@ Thought -> Action(tool call) -> Observation(tool result) -> ... -> Answer
 
 - `AgentRuntime.run()` 主流程。
 - Native tools 多轮调用，`MAX_TOOL_ROUNDS=12`。
+- 支持单个 `function_call` 和多个 `function_calls`。
+- 自动生成缺失的 tool call id，保证工具结果可回传给模型。
 - 工具调用结果写回短期记忆。
-- 支持 RAG、长期记忆、AGENT.md、TodoList 上下文注入。
+- 支持 RAG、长期记忆、AGENT.md、TodoList、Planning 上下文注入。
+- 工具调用错误以 Observation 形式返回，模型可继续修正。
 
-待增强：
+当前限制：
 
-- 多个 tool_calls 同时返回时当前只处理第一个，需要补齐多工具调用支持。
-- 工具调用错误恢复策略较弱。
-- 工具结果只做字符截断，没有按 token 或文件结构压缩。
+- 工具结果主要做字符截断，尚未实现按 token、文件结构或 diff 语义压缩。
+- 复杂任务的规划步骤目前使用本地启发式计划，LLM 规划入口保留但默认关闭，避免额外模型调用干扰工具循环。
 
-### 2. TodoList（任务拆解与追踪）- 基础完成，未自动化
+### 2. Planning + ReAct（复杂任务规划）- 已完成并接入
 
-当前已有 `core/todo.py`，并已接入 `main.py` 与 `context.py`。
+当前已有 `core/planning/manager.py`，并已接入 `core/runtime/agent_runtime.py`、`core/context/builder.py`、`main.py`。
+
+职责：
+
+- `PlanningManager.should_plan()` 判断任务是否复杂。
+- 简单任务保持纯 ReAct。
+- 复杂任务创建 `PlanState`，生成 3 到 6 个可执行步骤。
+- 将计划同步到 TodoList，形成可见进度。
+- 每次工具执行后读取 Observation。
+- 发现错误、失败、权限拒绝、Traceback 等结果时追加修正和验证步骤。
+- 写文件或编辑文件后自动补充验证步骤。
+- 计划变化会在同一轮工具循环中重新注入模型上下文，避免只能下一轮才生效。
+- `stream_run()` 也会启动 Planning，后续 Web/流式输出不会和普通 run 行为分裂。
+
+当前形态：
+
+```text
+用户任务
+  -> PlanningManager 判断复杂度
+  -> 简单任务：ReAct Loop
+  -> 复杂任务：生成 PlanState + 同步 TodoList
+  -> ReAct Loop 执行工具
+  -> Observation 反馈给 PlanningManager
+  -> 必要时更新计划并继续执行
+```
+
+### 3. TodoList（任务拆解与追踪）- 已完成并自动化
+
+当前已有 `core/todo/models.py`、`core/todo/store.py`、`tools/todo_tool.py`，并通过 `core.todo` / `core.todo_store` 保持旧导入兼容。
 
 已具备：
 
 - `Task` / `TaskStatus` / `TodoList`。
-- `add/start/complete/reset/block/cancel/insert/remove`。
+- `add/start/complete/reset/block/cancel/insert/remove/clear`。
 - `format_for_prompt()` 注入给 LLM。
-- CLI 命令：`/todo show | add | start | done | reset | clear`。
-- `test_stage2.py` 已覆盖并通过。
+- CLI 命令：`/todo show | add | start | done | reset | block | cancel | remove | clear`。
+- `update_todo` 工具，允许 Agent 自动维护任务列表。
+- `.agent_todo.json` 持久化，重启后可恢复。
+- PlanningManager 创建或更新计划时会同步 TodoList。
+- `/clear` 和 `/todo clear` 会同时清理过期 Planning 状态。
 
-当前问题：
+说明：TodoList 既是用户可查看的进度面板，也是 Planning + ReAct 的执行约束之一。
 
-- Agent 不会主动拆解任务，也不会自动更新任务状态。
-- TodoList 现在更像“用户手动进度面板”，还不是 Claude Code 风格的自动规划能力。
-- TodoList 未持久化，`/clear` 或重启后状态会丢失。
-
-下一步建议：提供 `update_todo` 工具，或者在 runtime 收到复杂任务时先要求模型生成计划，再写入 TodoList。
-
-### 3. Tool Use > RAG - 方向正确，但代码搜索工具不足
+### 4. Tool Use > RAG - 已完成关键代码工具
 
 当前已有：
 
 - `read_file`
 - `write_file`
 - `execute_code`
-- `web_search`
+- `web_search`（DuckDuckGo HTML/Lite，免费且无需额外配置）
+- `ls`
+- `grep`
+- `edit_file`
+- `update_todo`
 
-这能完成基础读写执行闭环，但距离代码代理常用工具仍有差距。
+说明：RAG 模块可以保留用于文档类知识检索；代码理解应优先走 `ls/grep/read_file`，小范围修改优先走 `edit_file`，需要全量创建或覆盖文件时再使用 `write_file`。
 
-待补齐：
-
-- `grep`：正则搜索代码内容。
-- `ls`：列出目录结构，并过滤 `venv/__pycache__` 等噪音目录。
-- `edit_file`：基于行号或精确匹配的小范围编辑，比 `write_file` 全量覆盖安全。
-
-说明：RAG 模块可以保留用于文档类知识检索；代码理解应优先走 `ls/grep/read_file`。
-
-### 4. Context Compression（上下文压缩）- 未完成，仅有雏形
+### 5. Context Compression（上下文压缩）- 已完成并接入
 
 当前已有：
 
 - `ShortMemory`：按消息数和 token 粗略截断。
-- `LongMemory`：JSON 持久化 facts/summaries。
-- `LongMemory.summarize_and_store()`：可保存简单摘要。
-- `AgentRuntime.context_compressor` 扩展点。
+- `LongMemory`：结构化 `MemoryItem` 持久化，兼容旧 `facts/summaries` JSON。
+- `MemoryItem`：包含 `id/type/content/tags/source/importance/embedding/content_hash/superseded_by/metadata`。
+- `LongMemory.search()`：基于当前查询做相关记忆检索，支持 type/tag/source 过滤。
+- `LongMemory(embedder=...)`：可复用 RAG 的 `Embedding` / BGE-M3 dense vector；未启用 RAG 时自动回退到本地轻量词向量。
+- `LongMemory.add_item()`：支持精确 hash 去重和本地向量相似去重。
+- `MemorySummarizer`：本地 fallback 摘要会保留用户目标、工具调用、文件线索、错误、测试结论和助手结论。
+- `core/context/compression.py`：`ContextCompressor` + `CompressionResult`，并保留 `core.compression` 兼容导出。
+- `AgentRuntime.context_compressor`：达到阈值时触发压缩。
+- Runtime 会用压缩摘要真实替换旧 `ShortMemory`，并把摘要写入 `LongMemory`。
+- Runtime 注入长期记忆时会结合当前用户输入和 Planning 目标检索相关记忆，而不是固定注入最近几条。
+- `main.py --rag` 会把 `Retriever.embedder` 传给 LongMemory，避免 RAG 和长期记忆各自重复加载 BGE 模型。
 
-当前问题：
+实现细节：
 
-- `summarize_and_store()` 默认只是统计“用户问了几个问题、助手回了几条”，不是 LLM 智能总结。
-- `_check_and_compress()` 调用 compressor 后没有替换 `ShortMemory` 的旧消息。
-- 没有保留“文件修改记录、错误日志、测试结论”等代码任务关键事实的结构化策略。
+- 优先调用 LLM 对旧历史做摘要。
+- LLM 不可用或失败时使用本地 fallback 摘要。
+- 摘要会保留用户目标、工具调用、工具结果、错误信息、测试结论等关键信息。
+- 如果压缩后 token 没有下降，会自动收紧摘要，避免“越压越大”。
+- `main.py` 默认启用压缩器：`threshold_tokens=50000`，`keep_recent=12`。
 
-目标形态：
+当前形态：
 
 ```text
 if total_tokens > threshold:
@@ -103,46 +138,43 @@ if total_tokens > threshold:
     memory.messages = [summary_message] + recent_messages
 ```
 
-### 5. SubAgent - 暂不做
+### 6. SubAgent - 暂不做
 
-第一版不建议引入 SubAgent。当前单 Agent 的工具、权限、上下文能力还没稳定，过早引入 SubAgent 会放大调度复杂度。
+第一版不建议引入 SubAgent。当前单 Agent 的工具、权限、上下文、规划能力已经能支撑阶段目标；过早引入 SubAgent 会放大调度复杂度。
 
-### 6. Permission System（权限分级）- 未真正接入
+### 7. Permission System（权限分级）- 已完成并接入
 
-当前已有设计痕迹：
+当前已有：
 
 - `tools/base_tool.py` 定义了 `SAFE/CAUTION/DANGEROUS` 和 `risk_level`。
 - `write_file` 标为 `CAUTION`。
-- `execute_code` 标为 `CAUTION`，注释里提到 shell 模式应动态升级为 `DANGEROUS`。
-- `AgentRuntime` 预留了 `permission_fn`。
+- `edit_file` 标为 `CAUTION`。
+- `execute_code` 标为 `CAUTION`，shell 模式会动态升级为 `DANGEROUS`。
+- `web_search` 会动态升级为 `CAUTION`，因为联网搜索可能泄露查询内容。
+- `core/permission/manager.py`：`PermissionManager` + `PermissionDecision`，并保留 `core.permission` 包入口导出。
+- `AgentRuntime` 在执行工具前调用 `permission_fn`。
+- `main.py` 在启用工具时创建并注入 `PermissionManager`。
+- 写文件默认限制在项目工作区内，系统路径会被直接阻断。
 
-当前问题：
+权限行为：
 
-- 没有 `core/permission.py`。
-- `main.py` 没有创建或注入 PermissionManager。
-- Runtime 执行工具时默认不会根据 `risk_level` 弹出确认。
-- `execute_code(shell)` 仍可直接通过模型调用，只依赖少量黑名单拦截。
-- `write_file` 只限制 `/dev /proc /sys /boot`，没有限制工作区边界。
-
-建议分级：
-
-- SAFE：`read_file`、`grep`、`ls`。
-- CAUTION：`web_search`（可能泄露查询内容）、`write_file`、`execute_code(python)`。
+- SAFE：`read_file`、`ls`、`grep`、`update_todo`。
+- CAUTION：`web_search`、`write_file`、`edit_file`、`execute_code(python)`。
 - DANGEROUS：`execute_code(shell)`、删除文件、修改工作区外文件、安装依赖、网络写操作。
 
-### 7. AGENT.md（项目级上下文）- 基础完成
+### 8. AGENT.md（项目级上下文）- 已完成
 
 当前已有：
 
 - 根目录 `AGENT.md`。
-- `core/project_context.py`。
+- `core/context/project_context.py`，并保留 `core.project_context` 兼容导出。
 - `main.py` 启动时读取 `AGENT.md`。
-- `context.py` 每轮把项目规则注入 system context。
+- `core/context/builder.py` 每轮把项目规则注入 system context。
 - `test_stage2.py` 已覆盖并通过。
 
 待增强：
 
-- 支持指定项目根目录，而不是只按当前 main.py 所在目录。
+- 支持指定项目根目录，而不是只按当前 `main.py` 所在目录。
 - 支持 AGENT.md 热更新或 `/reload` 命令。
 - 避免 AGENT.md 过大时挤占工具结果和对话历史 token。
 
@@ -151,12 +183,26 @@ if total_tokens > threshold:
 ```text
 coder-agent/
 ├── core/
-│   ├── runtime.py             # Agent Loop + Function Calling
-│   ├── message.py             # 统一消息结构
-│   ├── memory.py              # ShortMemory + LongMemory + 简单自动总结
-│   ├── context.py             # Prompt Context 构建
-│   ├── todo.py                # TodoList 数据结构
-│   └── project_context.py     # AGENT.md 读取与注入
+│   ├── runtime/
+│   │   ├── agent_runtime.py   # Agent Loop + Function Calling + Planning 接入
+│   │   ├── events.py          # Web/API 结构化事件
+│   │   ├── message.py         # 统一消息结构
+│   │   └── session.py         # Web/API 多会话 Runtime 管理
+│   ├── context/
+│   │   ├── builder.py         # Prompt Context 构建
+│   │   ├── compression.py     # 上下文压缩
+│   │   └── project_context.py # AGENT.md 读取与注入
+│   ├── memory/
+│   │   └── store.py           # ShortMemory + LongMemory + 结构化检索/去重
+│   ├── planning/
+│   │   └── manager.py         # PlanningManager + PlanState + 重规划逻辑
+│   ├── todo/
+│   │   ├── models.py          # TodoList 数据结构
+│   │   └── store.py           # TodoList 持久化
+│   ├── permission/
+│   │   ├── manager.py         # 权限分级与用户确认
+│   │   └── web.py             # Web/API 权限挂起与恢复
+│   └── *.py                   # 旧导入路径兼容层
 ├── llm/
 │   └── deepseek_client.py     # DeepSeek API，OpenAI 兼容 Function Calling
 ├── tools/
@@ -164,7 +210,9 @@ coder-agent/
 │   ├── registry.py            # Tool 注册中心
 │   ├── file_tool.py           # read_file / write_file
 │   ├── code_executor.py       # execute_code(python/shell)
-│   └── web_search.py          # web_search(DuckDuckGo / Google CSE)
+│   ├── web_search.py          # web_search(DuckDuckGo HTML/Lite)
+│   ├── project_tools.py       # ls / grep / edit_file
+│   └── todo_tool.py           # update_todo
 ├── rag/
 │   ├── embedding.py           # TextSplitter + BGE-M3
 │   └── retriever.py           # 向量检索器
@@ -172,57 +220,66 @@ coder-agent/
 ├── AGENT.md                   # 项目级上下文规则
 ├── test_tools.py              # 工具层测试
 ├── test_runtime.py            # Runtime / Function Calling 测试
-├── test_stage2.py             # TodoList / ProjectContext / Context 集成测试
+├── test_stage2.py             # Todo / Permission / Compression / Planning 集成测试
 └── promote.txt                # 本规划文档
 ```
 
-注意：当前项目目录中没有 `.git` 仓库，因此无法通过 git 状态判断改动历史。
+说明：`core/*.py` 中的部分文件是兼容导出层，用于保持旧路径导入可用；新代码优先使用分组后的包内实现文件。
 
-## 四、核心数据流（目标版本）
+## 四、核心数据流（当前实现）
 
 ```text
 用户任务
   -> 注入 AGENT.md 项目规则
-  -> Agent 自动创建 TodoList（当前尚未自动化）
+  -> PlanningManager 判断任务复杂度
+      -> 简单任务：纯 ReAct Loop
+      -> 复杂任务：生成 PlanState，并同步 TodoList
+  -> Context 注入 TodoList + Planning 状态
   -> ReAct Loop
       -> ls/grep/read_file 搜索代码
       -> edit_file/write_file 修改代码（权限确认）
       -> execute_code 跑测试或验证（权限确认）
-      -> 根据 Observation 继续修正
-  -> Context 过大时压缩旧历史（当前尚未完成）
-  -> Memory 更新 + TodoList 标记完成（当前 Todo 更新需手动）
+      -> 工具 Observation 写回 Memory
+      -> Observation 交给 PlanningManager 判断是否重规划
+      -> 计划变化时立即注入当前工具循环上下文
+  -> Context 过大时压缩旧历史
+  -> Memory 更新 + TodoList 持久化
   -> 最终答复
 ```
 
-## 五、发现的主要问题与冲突
+## 五、已解决的主要问题与剩余风险
 
-1. 规划文档状态落后于代码。
+1. 规划文档状态已与代码重新对齐。
 
-   旧文档把 `core/todo.py`、`core/project_context.py`、`AGENT.md` 标为待做，但这些已经存在并完成基础集成。
+   当前文档明确记录 `PlanningManager`、`TodoStore`、`PermissionManager`、`ContextCompressor`、`ls/grep/edit_file`、`update_todo` 的真实状态。
 
-2. LLM 后端描述冲突。
+2. 纯 ReAct 已升级为 ReAct + Planning 混合模式。
 
-   旧文档仍写 `llm/gemini_client.py`，实际代码主流程是 `llm/deepseek_client.py`；AGENT.md 也明确 DeepSeek 是主后端。
+   简单任务仍走轻量 ReAct；复杂任务会先规划、同步 TodoList，并在工具执行后根据 Observation 持续调整计划。
 
-3. TodoList 能力描述过度。
+3. LLM 后端描述已统一。
 
-   文档说“Agent 接到任务后先拆解并逐项标记”，但当前只支持 CLI 手动管理，LLM 没有工具或 runtime 逻辑去自动更新 TodoList。
+   主流程是 `llm/deepseek_client.py`，Gemini 相关依赖仅保留兼容说明。
 
-4. Permission System 还不是可用功能。
+4. TodoList 自动化已补齐。
 
-   工具有 `risk_level` 字段，runtime 有 `permission_fn` 扩展点，但没有 PermissionManager，也没有在 main.py 中接入确认流程。
+   当前既支持 CLI 手动管理，也支持模型通过 `update_todo` 工具自动维护任务列表，并通过 `.agent_todo.json` 持久化。
 
-5. Context Compression 与 LongMemory 混在一起描述。
+5. Permission System 已补齐。
 
-   当前 LongMemory 只是持久化摘要；真正的 compaction 应该替换短期历史中的旧消息，目前没有实现。
+   当前已有 PermissionManager、动态风险升级、工作区写入限制、系统路径阻断，以及 main.py 主流程接入。
 
-6. Tool-first 路线缺少关键工具。
+6. Context Compression 已补齐。
 
-   对代码项目来说，`grep/ls/edit_file` 比 RAG 更核心。当前只能读文件、写文件、执行命令，容易让模型用 `execute_code(shell)` 去代替安全工具。
+   当前 ContextCompressor 会生成摘要并替换旧短期历史，同时把摘要写入 LongMemory。
 
-7. 旧测试与文档曾有轻微漂移。
+7. Tool-first 关键工具已补齐。
 
-   `test_tools.py` 曾依赖 `promote.txt` 的具体文案。当前文档已保留兼容关键词，脚本测试已通过；后续仍建议测试文件读取结构，不要强绑定规划文案。
+   当前已有 `ls`、`grep`、`edit_file`，模型不再需要依赖 shell 完成常规代码搜索和小范围编辑。
+
+8. 剩余风险。
+
+   Planning 当前默认使用启发式步骤生成，稳定但不够智能；未来可以在不打断工具循环的前提下启用 LLM 规划或为计划步骤增加结构化状态。
 
 ## 六、阶段进度判断
 
@@ -236,47 +293,47 @@ coder-agent/
 - CLI 入口 `main.py`。
 - RAG 模块保留。
 - Runtime 支持单工具调用、多工具调用、工具调用 ID 回传、异常参数可恢复。
-- 新增 `test_runtime.py` 覆盖 Runtime 与 DeepSeek 本地格式转换。
+- `test_runtime.py` 覆盖 Runtime 与 DeepSeek 本地格式转换。
 
-第一阶段不再保留阻塞缺口。以下内容划入第二阶段：
-
-- 权限系统。
-- grep/ls/edit_file 等代码代理工具。
-- TodoList 自动化。
-- 真正的 Context Compression。
-
-### 第二阶段：Coder Agent 核心增强 - 约 35% 完成
+### 第二阶段：Coder Agent 核心增强 - 已完成
 
 已完成：
 
 - Step 1 TodoList 基础系统：完成。
 - Step 2 AGENT.md 系统：完成。
+- Step 3 Permission System：完成并接入 main.py / core/runtime/agent_runtime.py。
+- Step 4 Context Compression：完成并接入 main.py / core/runtime/agent_runtime.py。
+- Step 5 Claude Code 风格工具扩展：`ls` / `grep` / `edit_file` 完成。
+- Step 6 Planning + ReAct 混合执行：完成并接入 main.py / core/runtime/agent_runtime.py / core/context/builder.py。
+- TodoList 自动化：`update_todo` 工具完成。
+- TodoList 持久化：`TodoStore` + `.agent_todo.json` 完成。
 
-部分完成：
+### 第三阶段：Web 化 + 流式输出 - 前置能力已完成，页面未开始
 
-- Permission System：只有字段和扩展点，未接入。
-- Context Compression：只有 LongMemory 和 compressor hook，未实现真正压缩。
+已完成前置能力：
 
-未完成：
+- `core/runtime/events.py`：定义 `AgentEvent` 和 Web/API 可消费的结构化事件类型，并保留 `core.events` 兼容导出。
+- `AgentRuntime.run_events()`：输出用户消息、模型文本、工具调用、工具结果、Planning 更新、Todo 更新、最终回答等事件。
+- `AgentRuntime.resume_events()`：为 Web 权限确认后的恢复执行预留入口。
+- `core/permission/web.py`：提供权限挂起、请求序列化、外部批准/拒绝恢复模型，并保留 `core.web_permission` 兼容导出。
+- `core/runtime/session.py`：提供 `AgentSessionManager`，每个 session 独立维护 Runtime、Memory、TodoList、Planning、权限状态，并保留 `core.session` 兼容导出。
+- `edit_file(dry_run=True)`：支持 diff 预览，不实际写文件，便于前端展示修改预览。
 
-- GrepTool / LSTool / EditTool。
-- Agent 自动拆解和自动更新 TodoList。
-- TodoList 持久化。
+尚未开始：
 
-### 第三阶段：Web 化 + 流式输出 - 未开始
-
-已有 `stream_run()` 雏形，但没有 FastAPI、WebSocket、前端目录或 Web 会话管理。
+- FastAPI / WebSocket / SSE 服务层。
+- 前端目录和页面。
+- Web 权限确认 UI。
+- 工具调用、Todo、Planning 的可视化面板。
 
 ## 七、下一步实施顺序
 
-建议按以下顺序推进，而不是先做 Web：
+第二阶段已完成，后续建议进入第三阶段前先做少量打磨：
 
-1. 补 `core/permission.py` 并在 `main.py` 注入 PermissionManager。
-2. 增加 `grep`、`ls`、`edit_file` 三个工具，减少模型滥用 shell。
-3. 给 TodoList 增加模型可调用的 `update_todo` 工具，完成自动任务追踪。
-4. 实现真正的 Context Compression：LLM 摘要 + 替换旧短期历史。
-5. 增强测试：Runtime 工具调用、权限拒绝、Todo 自动更新、压缩触发。
-6. 第一/二阶段稳定后，再做 FastAPI + WebSocket。
+1. 为权限系统增加“本次会话始终允许某类操作”的策略。
+2. 进入第三阶段后端服务：FastAPI + WebSocket/SSE。
+3. 再进入前端页面：聊天流、工具调用面板、Todo/Planning 面板、权限确认弹窗。
+4. 为 Planning 状态增加结构化步骤状态，减少 TodoList 与 PlanState 的重复表达。
 
 ## 八、当前验证结果
 
@@ -284,8 +341,10 @@ coder-agent/
 
 - `python3 test_runtime.py`：5 项通过。
 - `python3 test_tools.py`：通过。
-- `python3 test_stage2.py`：11 项通过。
-- `python3 -m compileall core llm tools rag main.py test_tools.py test_stage2.py test_runtime.py`：通过。
-- `python3 -m pytest test_tools.py test_stage2.py test_runtime.py -q`：未运行成功，原因是当前 Python 环境未安装 pytest。
+- `python3 test_stage2.py`：24 项通过。
+- `python3 test_stage3_prep.py`：4 项通过。
+- `python3 -m compileall core llm tools rag main.py test_tools.py test_stage2.py test_stage3_prep.py test_runtime.py`：通过。
+- `python3 -m pytest test_tools.py test_stage2.py test_stage3_prep.py test_runtime.py -q`：未运行成功，原因是当前 Python 环境未安装 pytest。
+- `./venv/bin/pytest test_tools.py test_stage2.py test_stage3_prep.py test_runtime.py -q`：41 项通过，1 个 pytest warning（`test_registry` 返回了 ToolRegistry 对象）。
 
-结论：第一阶段已完成，项目已经进入第二阶段。当前最值得补的是权限系统和代码搜索/编辑工具，因为它们直接决定这个项目能否从“会聊天、会调用工具”升级为“可控地改代码并验证”的 Coder Agent。
+结论：第一阶段和第二阶段均已完成。项目现在具备 Agent Loop、ReAct + Planning 混合执行、工具调用、DuckDuckGo 免费联网搜索、权限确认、项目上下文、结构化长期记忆检索、Todo 追踪/持久化、代码搜索/编辑工具和上下文压缩能力。

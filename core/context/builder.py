@@ -10,6 +10,7 @@ def build_context(
     long_memory_context: Optional[str] = None,
     project_context: Optional[str] = None,   
     todo_context: Optional[str] = None,       
+    planning_context: Optional[str] = None,
 ) -> List[Message]:
 
     context: List[Message] = []
@@ -17,8 +18,6 @@ def build_context(
     # 系统指令
     context.append(Message(role="system", content=system_prompt))
 
-    # 注意：project_context 已由 ProjectContext.get_context_str() 格式化，
-    # 包含完整标题和规则文本，此处直接注入不重复包装。
     if project_context:
         context.append(Message(role="system", content=project_context))
 
@@ -26,6 +25,12 @@ def build_context(
         context.append(Message(
             role="system",
             content=f"【当前任务进度】\n{todo_context}",
+        ))
+
+    if planning_context:
+        context.append(Message(
+            role="system",
+            content=f"【当前执行计划】\n{planning_context}\n请按计划推进；如果工具结果显示计划不合适，请先调整计划再继续执行。",
         ))
 
     # 长期记忆注入（在系统指令后，对话历史前）
@@ -59,7 +64,7 @@ def build_short_context(
     system_prompt: str,
     user_input: str,
     rag_results: Optional[List[str]] = None,
-    project_context: Optional[str] = None,   # ✅ Stage 2
+    project_context: Optional[str] = None,
 ) -> List[Message]:
     context: List[Message] = [
         Message(role="system", content=system_prompt),

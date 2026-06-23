@@ -1,10 +1,8 @@
-import os
-import json
 import re
 import logging
 import urllib.request
 import urllib.parse
-from typing import List, Optional
+from typing import List
 from tools.base_tool import BaseTool, SAFE
 
 logger = logging.getLogger(__name__)
@@ -35,33 +33,11 @@ class WebSearchTool(BaseTool):
         "required": ["query"],
     }
 
-    def __init__(self):
-        self._provider: Optional[str] = None
-        self._checked = False
-
-    def _detect_provider(self):
-        if self._checked:
-            return
-        self._checked = True
-
-        cse_id = os.getenv("GOOGLE_CSE_ID")
-        cse_key = os.getenv("GOOGLE_CSE_KEY")
-        if cse_id and cse_key:
-            self._provider = "google"
-            logger.info("WebSearchTool: 使用 Google Custom Search")
-        else:
-            self._provider = "duckduckgo_html"
-            logger.info("WebSearchTool: 使用 DuckDuckGo HTML 搜索（免费，无需配置）")
-
     def execute(self, query: str, max_results: int = 5, **kwargs) -> str:
-        self._detect_provider()
         max_results = min(max(max_results, 1), 10)
 
         try:
-            if self._provider == "google":
-                results = self._search_google(query, max_results)
-            else:
-                results = self._search_duckduckgo_html(query, max_results)
+            results = self._search_duckduckgo_html(query, max_results)
 
             if not results:
                 return (
@@ -69,7 +45,12 @@ class WebSearchTool(BaseTool):
                     "建议：尝试更简短的关键词，或换个说法再搜。"
                 )
 
-            output = [f"搜索: {query}", f"共 {len(results)} 条", "-" * 50]
+            output = [
+                f"搜索: {query}",
+                "Provider: duckduckgo",
+                f"共 {len(results)} 条",
+                "-" * 50,
+            ]
             for i, r in enumerate(results, 1):
                 output.append(f"{i}. {r.get('title', '无标题')}")
                 snippet = r.get('snippet', '')
@@ -159,13 +140,13 @@ class WebSearchTool(BaseTool):
         for i, (href, title) in enumerate(links):
             if i >= max_results:
                 break
-            title_clean = re.sub(r'<[^>]+>', '', title).strip()
+            title_clean = _clean_html(title)
             if not title_clean:
                 continue
 
             snippet_clean = ""
             if i < len(snippets):
-                snippet_clean = re.sub(r'<[^>]+>', '', snippets[i]).strip()
+                snippet_clean = _clean_html(snippets[i])
 
             # 去掉 URL 中的 DuckDuckGo 重定向前缀
             url_clean = href
@@ -179,6 +160,7 @@ class WebSearchTool(BaseTool):
                 "title": title_clean,
                 "snippet": snippet_clean,
                 "url": url_clean,
+                "provider": "duckduckgo_html",
             })
 
         return results
@@ -210,41 +192,35 @@ class WebSearchTool(BaseTool):
         for i, (href, title) in enumerate(valid_links):
             if i >= max_results:
                 break
-            title_clean = re.sub(r'<[^>]+>', '', title).strip()
+            title_clean = _clean_html(title)
             if not title_clean:
                 continue
 
             snippet_clean = ""
             if i < len(snippets):
-                snippet_clean = re.sub(r'<[^>]+>', '', snippets[i]).strip()
+                snippet_clean = _clean_html(snippets[i])
 
             results.append({
                 "title": title_clean,
                 "snippet": snippet_clean,
                 "url": href,
+                "provider": "duckduckgo_lite",
             })
 
         return results
 
-    # ── Google Custom Search（保留兼容）─────────
 
-    def _search_google(self, query: str, max_results: int) -> List[dict]:
-        cse_id = os.getenv("GOOGLE_CSE_ID")
-        cse_key = os.getenv("GOOGLE_CSE_KEY")
-        url = (
-            "https://www.googleapis.com/customsearch/v1"
-            f"?key={cse_key}&cx={cse_id}"
-            f"&q={urllib.parse.quote(query)}&num={max_results}"
-        )
-        req = urllib.request.Request(url)
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-
-        results = []
-        for item in data.get("items", [])[:max_results]:
-            results.append({
-                "title": item.get("title", ""),
-                "snippet": item.get("snippet", ""),
-                "url": item.get("link", ""),
-            })
-        return results
+def _clean_html(text: str) -> str:
+    if not text:
+        return ""
+    text = re.sub(r"<[^>]+>", "", str(text))
+    replacements = {
+        "&amp;": "&",
+        "&lt;": "<",
+        "&gt;": ">",
+        "&quot;": '"',
+        "&#39;": "'",
+    }
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+    return " ".join(text.split()).strip()

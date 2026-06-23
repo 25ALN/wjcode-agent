@@ -31,6 +31,8 @@ htmlcov/
 
 # Runtime state and logs
 memory_long.json
+.agent_todo.json
+.agent_sessions/
 *.log
 logs/
 *.tmp

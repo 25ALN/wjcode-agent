@@ -14,8 +14,7 @@ LLM 后端：DeepSeek API（deepseek-chat）
 
 关于 /todo 命令：
     /todo 是终端层面的 CLI 命令（not a Tool），用于人工管理任务追踪。
-    用法：/todo add <描述>  |  /todo start <序号>  |  /todo done <序号>
-    这 4 个 Tool 是完全自动的，不需要手动调用。
+    工具层另外提供 update_todo，用于让 Agent 自动维护任务进度。
 """
 
 import sys
@@ -33,12 +32,18 @@ from core.message import Message
 from core.memory import ShortMemory, LongMemory
 from core.runtime import AgentRuntime
 from core.todo import TodoList
+from core.todo_store import TodoStore
 from core.project_context import ProjectContext
+from core.planning import PlanningManager
+from core.permission import PermissionManager
+from core.compression import ContextCompressor
 from llm.deepseek_client import DeepSeekClient
 from tools.registry import ToolRegistry
 from tools.file_tool import FileReadTool, FileWriteTool
 from tools.code_executor import CodeExecutorTool
 from tools.web_search import WebSearchTool
+from tools.project_tools import LSTool, GrepTool, EditTool
+from tools.todo_tool import TodoUpdateTool
 from rag.retriever import Retriever, create_retriever
 
 SYSTEM_PROMPT = (
@@ -54,6 +59,9 @@ SYSTEM_PROMPT = (
     "请直接基于已读取的内容和之前的分析来回答，不要重新读取相同的文件！"
     "只有用户要求查看新文件、或确信需要新的工具结果才能回答时，才再次调用工具。"
     "如果你已经分析过某个项目，后续追问该项目时直接用记忆回答即可。"
+    "\n\n【任务追踪 - 重要】"
+    "当用户提出需要多步骤完成的编程任务时，请先使用 update_todo 工具创建任务列表，"
+    "执行过程中用 update_todo 标记 start/done/block，保持任务进度和实际工作同步。"
 )
 
 RAG_SYSTEM_PROMPT = (
@@ -69,6 +77,9 @@ RAG_SYSTEM_PROMPT = (
     "请直接基于已读取的内容和之前的分析来回答，不要重新读取相同的文件！"
     "只有用户要求查看新文件、或确信需要新的工具结果才能回答时，才再次调用工具。"
     "如果你已经分析过某个项目，后续追问该项目时直接用记忆回答即可。"
+    "\n\n【任务追踪 - 重要】"
+    "当用户提出需要多步骤完成的编程任务时，请先使用 update_todo 工具创建任务列表，"
+    "执行过程中用 update_todo 标记 start/done/block，保持任务进度和实际工作同步。"
 )
 
 
@@ -87,6 +98,11 @@ def build_runtime(use_tools: bool = False, use_rag: bool = False) -> AgentRuntim
 
     registry = None
     rag_fn = None
+    permission_fn = None
+    memory_embedder = None
+
+    todo_store = TodoStore(os.path.join(project_root, ".agent_todo.json"))
+    todo = todo_store.load()
 
     if use_tools:
         registry = ToolRegistry()
@@ -94,11 +110,22 @@ def build_runtime(use_tools: bool = False, use_rag: bool = False) -> AgentRuntim
         registry.register(FileWriteTool())
         registry.register(CodeExecutorTool())
         registry.register(WebSearchTool())
+        registry.register(LSTool())
+        registry.register(GrepTool())
+        registry.register(EditTool())
+        registry.register(TodoUpdateTool(todo, todo_store))
+        permission_manager = PermissionManager(
+            tool_registry=registry,
+            project_root=project_root,
+        )
+        permission_fn = permission_manager.approve
         print(f"🔧 已加载 {registry.tool_count} 个工具: {registry.list_names()}")
+        print("🔐 权限系统: 已启用（写文件、执行代码、联网搜索等风险操作需确认）")
 
     if use_rag:
         print("📚 正在加载 RAG 模型（BGE-M3），首次需要下载...")
         retriever = create_retriever()
+        memory_embedder = retriever.embedder
         docs = []
         for fname in ["promote.txt"]:
             fpath = os.path.join(project_root, fname)
@@ -119,10 +146,16 @@ def build_runtime(use_tools: bool = False, use_rag: bool = False) -> AgentRuntim
         print(f"📋 AGENT.md: 已加载项目规则 ({project_ctx.size} 字符)")
 
     # 初始化 LongMemory（启用自动总结，每8轮触发）
-    long_memory = LongMemory(storage_path="memory_long.json")
+    long_memory = LongMemory(storage_path="memory_long.json", embedder=memory_embedder)
 
-    # Stage 2 Step 1 — 初始化 TodoList
-    todo = TodoList()
+    # Stage 2 Step 4 — 上下文压缩
+    context_compressor = ContextCompressor(
+        threshold_tokens=50000,
+        keep_recent=12,
+    )
+
+    # Stage 2 Step 5 — Planning 层
+    planning_manager = PlanningManager(todo_list=todo, enable_llm_planning=False)
 
     runtime = AgentRuntime(
         llm_client=llm,
@@ -132,7 +165,11 @@ def build_runtime(use_tools: bool = False, use_rag: bool = False) -> AgentRuntim
         long_memory=long_memory,
         project_context=project_context_str,
         todo_list=todo,
+        planning_manager=planning_manager,
+        permission_fn=permission_fn,
+        context_compressor=context_compressor,
     )
+    runtime.todo_store = todo_store
     return runtime
 
 
@@ -154,7 +191,8 @@ def main():
 
     print()
     print("  输入对话内容，/exit 退出，/clear 清空记忆")
-    print("  /todo show | add <描述> | start <序号> | done <序号>")
+    print("  /todo show | add <描述> | start <序号> | done <序号> [结果] | block <序号> [原因]")
+    print("  复杂任务会先进入 Planning 模式，再在执行中持续重规划")
     if use_rag:
         print("  💡 RAG 示例问题: '这个项目采用什么架构？'")
     print("=" * 55)
@@ -180,6 +218,10 @@ def main():
             runtime.reset_memory()
             if runtime.todo_list:
                 runtime.todo_list.clear()
+            if getattr(runtime, "planning_manager", None):
+                runtime.planning_manager.reset()
+            if hasattr(runtime, "todo_store"):
+                runtime.todo_store.save(runtime.todo_list)
             print("🧹 记忆已清空\n")
             continue
 
@@ -208,27 +250,31 @@ def _handle_todo_command(runtime: AgentRuntime, raw_input: str) -> None:
     if sub == "show" or sub == "list":
         print(todo.format_for_prompt())
         print(f"进度: {todo.progress():.0%}")
+        _show_planning(runtime)
 
     elif sub == "add":
         if len(parts) < 3:
             print("用法: /todo add <任务描述>")
         else:
             task = todo.add(parts[2])
+            _save_todo(runtime)
             print(f"✅ 已添加: {task.description}")
             print(todo.format_compact())
+            _show_planning(runtime)
 
     elif sub == "done" or sub == "complete":
         if len(parts) < 3:
-            print("用法: /todo done <序号>")
+            print("用法: /todo done <序号> [结果]")
         else:
-            try:
-                idx = int(parts[2])
-                if todo.complete(idx):
-                    print(f"✅ 任务 {idx} 已标记完成")
-                else:
-                    print(f"❌ 无效的任务序号: {idx}")
-            except ValueError:
+            idx, result = _parse_index_and_result(parts[2])
+            if idx is None:
                 print(f"❌ 无效的序号: {parts[2]}")
+            elif todo.complete(idx, result):
+                _save_todo(runtime)
+                print(f"✅ 任务 {idx} 已标记完成")
+            else:
+                print(f"❌ 无效的任务序号: {idx}")
+            _show_planning(runtime)
 
     elif sub == "start":
         if len(parts) < 3:
@@ -237,11 +283,13 @@ def _handle_todo_command(runtime: AgentRuntime, raw_input: str) -> None:
             try:
                 idx = int(parts[2])
                 if todo.start(idx):
+                    _save_todo(runtime)
                     print(f"🔄 任务 {idx} 已开始")
                 else:
                     print(f"❌ 无效的任务序号: {idx}")
             except ValueError:
                 print(f"❌ 无效的序号: {parts[2]}")
+            _show_planning(runtime)
 
     elif sub == "reset":
         if len(parts) < 3:
@@ -250,21 +298,95 @@ def _handle_todo_command(runtime: AgentRuntime, raw_input: str) -> None:
             try:
                 idx = int(parts[2])
                 if todo.reset(idx):
+                    _save_todo(runtime)
                     print(f"⬜ 任务 {idx} 已重置为待处理")
                 else:
                     print(f"❌ 无效的任务序号: {idx}")
             except ValueError:
                 print(f"❌ 无效的序号: {parts[2]}")
+            _show_planning(runtime)
+
+    elif sub == "block":
+        if len(parts) < 3:
+            print("用法: /todo block <序号> [原因]")
+        else:
+            idx, result = _parse_index_and_result(parts[2])
+            if idx is None:
+                print(f"❌ 无效的序号: {parts[2]}")
+            elif todo.block(idx, result):
+                _save_todo(runtime)
+                print(f"🚫 任务 {idx} 已标记阻塞")
+            else:
+                print(f"❌ 无效的任务序号: {idx}")
+            _show_planning(runtime)
+
+    elif sub == "cancel":
+        if len(parts) < 3:
+            print("用法: /todo cancel <序号> [原因]")
+        else:
+            idx, result = _parse_index_and_result(parts[2])
+            if idx is None:
+                print(f"❌ 无效的序号: {parts[2]}")
+            elif todo.cancel(idx, result):
+                _save_todo(runtime)
+                print(f"❌ 任务 {idx} 已取消")
+            else:
+                print(f"❌ 无效的任务序号: {idx}")
+            _show_planning(runtime)
+
+    elif sub == "remove":
+        if len(parts) < 3:
+            print("用法: /todo remove <序号>")
+        else:
+            try:
+                idx = int(parts[2])
+                removed = todo.remove(idx)
+                if removed:
+                    _save_todo(runtime)
+                    print(f"🗑️ 已移除: {removed.description}")
+                else:
+                    print(f"❌ 无效的任务序号: {idx}")
+            except ValueError:
+                print(f"❌ 无效的序号: {parts[2]}")
+            _show_planning(runtime)
 
     elif sub == "clear":
         todo.clear()
+        if getattr(runtime, "planning_manager", None):
+            runtime.planning_manager.reset()
+        _save_todo(runtime)
         print("🧹 TodoList 已清空")
 
     else:
         print(f"❌ 未知的 /todo 子命令: {sub}")
-        print("  可用: show | add <描述> | done <序号> | start <序号> | reset <序号> | clear")
+        print("  可用: show | add <描述> | done <序号> | start <序号> | reset <序号> | block <序号> [原因] | cancel <序号> [原因] | remove <序号> | clear")
 
     print()
+
+
+def _save_todo(runtime: AgentRuntime) -> None:
+    store = getattr(runtime, "todo_store", None)
+    if store is not None and runtime.todo_list is not None:
+        store.save(runtime.todo_list)
+
+
+def _parse_index_and_result(text: str):
+    parts = text.split(maxsplit=1)
+    try:
+        idx = int(parts[0])
+    except (ValueError, IndexError):
+        return None, None
+    result = parts[1] if len(parts) > 1 else None
+    return idx, result
+
+
+def _show_planning(runtime: AgentRuntime) -> None:
+    pm = getattr(runtime, "planning_manager", None)
+    if pm is None:
+        return
+    text = pm.format_for_prompt()
+    if text:
+        print(text)
 
 
 if __name__ == "__main__":
