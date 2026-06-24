@@ -8,10 +8,12 @@
 - 入口文件：main.py
 
 ## 构建与运行
-- 安装依赖：`pip install google-generativeai python-dotenv`（仅保留用于兼容 GeminiClient，主流程不需要）
-- 启动命令：`python3 main.py`
+- 安装 CLI 依赖：`pip install python-dotenv`
+- 可选 Web 依赖：`pip install fastapi uvicorn`
+- 启动 CLI：`python3 main.py`
 - 启用工具：`python3 main.py --tools`
 - 启用 RAG：`python3 main.py --tools --rag`
+- 启动 Web API：`python3 -m server.main --host 127.0.0.1 --port 8000`
 - 测试命令：`python3 -m pytest`（pytest 未安装时用 `python3 test_*.py`）
 
 ## API 密钥配置
@@ -35,13 +37,14 @@
 ```
 core/              — 核心能力包
   runtime/         — AgentRuntime、事件、消息结构、Web/API session
-  context/         — Prompt 构建、上下文压缩、AGENT.md 项目上下文
+  context/         — Prompt 构建、Scratchpad、上下文压缩、AGENT.md 项目上下文
   memory/          — ShortMemory、LongMemory、结构化记忆检索与去重
   planning/        — PlanningManager、PlanState、重规划逻辑
   todo/            — TodoList 数据结构与持久化
   permission/      — 权限分级、Web/API 权限挂起与恢复
   *.py             — 旧导入路径兼容层，例如 core.message/core.compression
 tools/             — 工具层（BaseTool、Registry、File、Code、Web、Project、Todo）
+server/            — FastAPI/SSE Web API 适配层
 llm/               — 模型封装层（DeepSeekClient 主力）
 rag/               — RAG 检索（BGE-M3，辅助能力）
 main.py            — 终端对话入口
@@ -55,8 +58,10 @@ promote.txt        — 项目规划文档
 - Tool-first：代码理解优先使用 `ls` / `grep` / `read_file`，小范围修改优先使用 `edit_file`
 - 简单任务走 ReAct；复杂任务必须通过 PlanningManager 生成计划，再进入 ReAct 工具循环
 - Planning 状态需要注入上下文；工具 Observation 暴露错误、失败、权限拒绝或代码修改后，应触发计划更新或补充验证步骤
+- Scratchpad 只记录显式中间状态（目标、已确认事实、相关文件、尝试、阻塞、下一步），禁止记录隐藏推理或完整思考链
 - 多步骤任务应通过 PlanningManager 和 `update_todo` 维护任务进度
-- Web/API 层应使用 `AgentRuntime.run_events()` / `resume_events()` 获取结构化事件，不直接解析 CLI 文本输出
+- Web/API 层应使用 `server.service.AgentWebService` 暴露会话、SSE 消息流和权限恢复，不直接解析 CLI 文本输出
+- FastAPI 只作为薄适配层放在 `server/app.py`，核心服务逻辑应保持可单测、不可依赖真实 HTTP 环境
 - Web/API 多会话应通过 `AgentSessionManager` 创建隔离 runtime，每个 session 独立维护 Memory、TodoList、Planning 和权限状态
 - 长期记忆必须使用结构化 `MemoryItem`，注入上下文前应按当前用户输入/Planning 目标检索相关记忆，避免无关历史挤占上下文
 - 添加长期记忆时应进行 hash 去重和相似度去重；新摘要必须保留用户目标、文件线索、工具结果、错误和测试结论

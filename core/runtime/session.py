@@ -52,6 +52,9 @@ class AgentSession:
         pending = None
         if self.permission_controller is not None and self.permission_controller.pending:
             pending = self.permission_controller.pending.to_dict()
+        scratchpad = None
+        if getattr(self.runtime, "scratchpad", None) is not None:
+            scratchpad = self.runtime.scratchpad.to_dict()
         return {
             "session_id": self.session_id,
             "workspace_root": self.workspace_root,
@@ -61,6 +64,7 @@ class AgentSession:
             "planning": planning,
             "todo": todo,
             "pending_permission": pending,
+            "scratchpad": scratchpad,
         }
 
 

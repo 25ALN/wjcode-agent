@@ -3,7 +3,7 @@ from typing import List, Optional, Generator, Callable, Any, Dict
 from uuid import uuid4
 from core.message import Message
 from core.memory import ShortMemory, LongMemory
-from core.context import build_context
+from core.context import Scratchpad, build_context
 from core.events import (
     AgentEvent,
     ASSISTANT_TEXT,
@@ -51,6 +51,7 @@ class AgentRuntime:
         planning_manager: Optional[PlanningManager] = None,
         permission_fn: Optional[Callable] = None,
         context_compressor: Optional[object] = None,
+        scratchpad: Optional[Scratchpad] = None,
         session_id: Optional[str] = None,
     ):
         self.llm = llm_client
@@ -68,6 +69,7 @@ class AgentRuntime:
         self.planning_manager = planning_manager
         self.permission_fn = permission_fn
         self.context_compressor = context_compressor
+        self.scratchpad = scratchpad or Scratchpad()
         self.session_id = session_id or uuid4().hex
         self._pending_tool_call: Optional[dict] = None
         self._pending_context: Optional[List[Message]] = None
@@ -78,6 +80,7 @@ class AgentRuntime:
     def run(self, user_input: str) -> str:
         user_message = Message(role="user", content=user_input)
         self.memory.add_message(user_message)
+        self._start_scratchpad(user_input)
 
         if self.context_compressor is not None:
             self._check_and_compress()
@@ -100,6 +103,7 @@ class AgentRuntime:
 
         user_message = Message(role="user", content=user_input)
         self.memory.add_message(user_message)
+        self._start_scratchpad(user_input)
         yield self._event(USER_MESSAGE, {"content": user_input})
 
         if self.context_compressor is not None:
@@ -159,12 +163,14 @@ class AgentRuntime:
         long_memory_context = self._get_long_memory_context()
         todo_context = self._get_todo_context()
         planning_context = self._get_planning_context()
+        scratchpad_context = self._get_scratchpad_context()
 
         context = self._build_context(
             rag_results=rag_results,
             long_memory_context=long_memory_context,
             todo_context=todo_context,
             planning_context=planning_context,
+            scratchpad_context=scratchpad_context,
         )
 
         tools = self.tool_registry.get_function_declarations()
@@ -232,6 +238,7 @@ class AgentRuntime:
                     )
                     self.memory.add_message(tool_msg)
                     context.append(tool_msg)
+                    self._observe_scratchpad(fn_name, fn_args, tool_content)
 
                     if self.planning_manager is not None:
                         planning_update = self._update_plan_from_observation(
@@ -241,6 +248,10 @@ class AgentRuntime:
                         )
                         if planning_update is not None and planning_update.changed:
                             plan_changed = True
+
+                refreshed_scratchpad = self._get_scratchpad_context()
+                if refreshed_scratchpad:
+                    context.append(self._scratchpad_context_message(refreshed_scratchpad))
 
                 if plan_changed:
                     refreshed_plan = self._get_planning_context()
@@ -272,12 +283,14 @@ class AgentRuntime:
         long_memory_context = self._get_long_memory_context()
         todo_context = self._get_todo_context()
         planning_context = self._get_planning_context()
+        scratchpad_context = self._get_scratchpad_context()
 
         context = self._build_context(
             rag_results=rag_results,
             long_memory_context=long_memory_context,
             todo_context=todo_context,
             planning_context=planning_context,
+            scratchpad_context=scratchpad_context,
         )
         tools = self.tool_registry.get_function_declarations()
         yield from self._continue_native_tools_events(context, tools, 0, None)
@@ -345,6 +358,10 @@ class AgentRuntime:
                     context.append(tool_msg)
                     plan_changed = changed or plan_changed
                     yield self._event(TOOL_RESULT, self._tool_result_payload(tool_msg))
+
+                refreshed_scratchpad = self._get_scratchpad_context()
+                if refreshed_scratchpad:
+                    context.append(self._scratchpad_context_message(refreshed_scratchpad))
 
                 if plan_changed:
                     refreshed_plan = self._get_planning_context()
@@ -429,6 +446,7 @@ class AgentRuntime:
 
         long_memory_context = self._get_long_memory_context()
         todo_context = self._get_todo_context()
+        scratchpad_context = self._get_scratchpad_context()
 
         context = build_context(
             system_prompt=self.system_prompt,
@@ -439,6 +457,7 @@ class AgentRuntime:
             project_context=self.project_context,
             todo_context=todo_context,
             planning_context=planning_context,
+            scratchpad_context=scratchpad_context,
         )
 
         try:
@@ -453,6 +472,7 @@ class AgentRuntime:
     def stream_run(self, user_input: str) -> Generator[str, None, None]:
         user_message = Message(role="user", content=user_input)
         self.memory.add_message(user_message)
+        self._start_scratchpad(user_input)
 
         if self.context_compressor is not None:
             self._check_and_compress()
@@ -475,6 +495,7 @@ class AgentRuntime:
 
         long_memory_context = self._get_long_memory_context()
         todo_context = self._get_todo_context()
+        scratchpad_context = self._get_scratchpad_context()
 
         context = build_context(
             system_prompt=self.system_prompt,
@@ -485,6 +506,7 @@ class AgentRuntime:
             project_context=self.project_context,
             todo_context=todo_context,
             planning_context=planning_context,
+            scratchpad_context=scratchpad_context,
         )
 
         full_reply = ""
@@ -542,6 +564,7 @@ class AgentRuntime:
         long_memory_context: Optional[str] = None,
         todo_context: Optional[str] = None,
         planning_context: Optional[str] = None,
+        scratchpad_context: Optional[str] = None,
     ) -> List[Message]:
         history = self.memory.get_recent_messages()
         return build_context(
@@ -552,6 +575,44 @@ class AgentRuntime:
             project_context=self.project_context,
             todo_context=todo_context,
             planning_context=planning_context,
+            scratchpad_context=scratchpad_context,
+        )
+
+    def _start_scratchpad(self, user_input: str) -> None:
+        if self.scratchpad is not None:
+            self.scratchpad.set_objective(user_input)
+
+    def _get_scratchpad_context(self) -> Optional[str]:
+        if self.scratchpad is None:
+            return None
+        try:
+            return self.scratchpad.format_for_prompt()
+        except Exception as e:
+            logger.warning(f"Scratchpad 上下文获取失败: {e}")
+            return None
+
+    def _observe_scratchpad(self, tool_name: str, args: dict, observation: str) -> None:
+        if self.scratchpad is None:
+            return
+        try:
+            self.scratchpad.observe_tool_result(
+                tool_name,
+                args if isinstance(args, dict) else {},
+                observation,
+            )
+        except Exception as e:
+            logger.warning(f"Scratchpad 更新失败: {e}")
+
+    @staticmethod
+    def _scratchpad_context_message(scratchpad_context: str) -> Message:
+        return Message(
+            role="system",
+            content=(
+                "【当前任务草稿区已更新】\n"
+                f"{scratchpad_context}\n"
+                "请基于这些显式工作笔记继续推进。"
+            ),
+            metadata={"scratchpad_context": True},
         )
 
     def _maybe_start_plan(self, user_input: str):
@@ -561,6 +622,8 @@ class AgentRuntime:
             update = self.planning_manager.start_or_update_plan(user_input, getattr(self, "llm", None))
             if update.changed:
                 logger.info(f"Planning 已启动: {update.reason}")
+                if self.scratchpad is not None:
+                    self.scratchpad.merge_next_steps(list(update.plan.steps))
                 self._save_todo_if_available()
             return update
         except Exception as e:
@@ -574,6 +637,8 @@ class AgentRuntime:
             update = self.planning_manager.observe_tool_result(tool_name, args, observation)
             if update.changed:
                 logger.info(f"Planning 已更新: {update.reason}")
+                if self.scratchpad is not None:
+                    self.scratchpad.merge_next_steps(list(update.plan.steps[-3:]))
                 self._save_todo_if_available()
             return update
         except Exception as e:
@@ -611,6 +676,8 @@ class AgentRuntime:
                 }
             },
         )
+
+        self._observe_scratchpad(fn_name, fn_args, tool_content)
 
         planning_update = None
         if self.planning_manager is not None:
@@ -801,10 +868,14 @@ class AgentRuntime:
             parts.append(f"AGENT.md: 已加载 ({len(self.project_context)} 字符)")
         if self.todo_list:
             parts.append(f"TodoList: 已配置")
+        if self.scratchpad and not self.scratchpad.is_empty():
+            parts.append("Scratchpad: 已记录当前任务状态")
         return "\n".join(parts)
 
     def reset_memory(self):
         self.memory.clear()
+        if self.scratchpad is not None:
+            self.scratchpad.clear()
         self._conversation_turns = 0
 
     def reset_long_memory(self):
