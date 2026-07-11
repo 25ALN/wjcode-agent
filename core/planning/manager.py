@@ -9,7 +9,7 @@ from core.todo import TodoList
 logger = logging.getLogger(__name__)
 
 
-COMPLEX_KEYWORDS = (
+ACTION_KEYWORDS = (
     "实现",
     "完成",
     "修改",
@@ -21,16 +21,55 @@ COMPLEX_KEYWORDS = (
     "集成",
     "优化",
     "测试",
+    "运行",
+    "执行",
+    "检查",
+    "调试",
+    "定位",
+    "复现",
+    "删除",
+    "创建",
+    "编写",
+    "继续",
+    "fix",
+    "refactor",
+    "implement",
+    "integrate",
+    "run",
+    "test",
+    "debug",
+)
+
+COMPLEX_KEYWORDS = (
     "全部",
     "阶段",
     "复杂",
     "规划",
     "多步",
+    "多个",
+    "一系列",
     "feature",
-    "fix",
-    "refactor",
-    "implement",
-    "integrate",
+)
+
+EXPLANATION_HINTS = (
+    "是什么",
+    "什么是",
+    "为什么",
+    "如何",
+    "怎么",
+    "怎样",
+    "解释",
+    "介绍",
+    "说明",
+    "概念",
+    "原理",
+    "区别",
+    "优缺点",
+    "你觉得",
+    "吗",
+    "是否",
+    "能否",
+    "可以",
 )
 
 OBSERVATION_ERROR_KEYWORDS = (
@@ -93,9 +132,22 @@ class PlanningManager:
         text = user_input.strip()
         if not text:
             return False
+
+        lower = text.lower()
+        has_action = any(keyword.lower() in lower for keyword in ACTION_KEYWORDS)
+        has_explanation = any(keyword.lower() in lower for keyword in EXPLANATION_HINTS)
+
+        # “复杂任务如何处理”这类是机制解释，不是需要拆解执行的复杂任务。
+        if has_explanation and not has_action:
+            return False
+
+        if not has_action:
+            return False
+
         if len(text) >= self.min_complex_length:
             return True
-        return any(keyword.lower() in text.lower() for keyword in COMPLEX_KEYWORDS)
+
+        return any(keyword.lower() in lower for keyword in COMPLEX_KEYWORDS)
 
     def start_or_update_plan(
         self,

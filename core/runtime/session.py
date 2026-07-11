@@ -26,7 +26,7 @@ from tools.web_search import WebSearchTool
 
 DEFAULT_SYSTEM_PROMPT = (
     "你是一个 AI 编程助手。简单任务使用 ReAct，复杂任务使用 Planning + ReAct。"
-    "代码理解优先使用 ls/grep/read_file，小范围修改优先使用 edit_file。"
+    "只有当问题需要查看、修改或验证当前项目时才使用工具；概念、建议和普通问答直接回答，且禁止输出 DSML/tool_calls 等工具协议文本。代码理解优先使用 ls/grep/read_file，小范围修改优先使用 edit_file。"
 )
 
 

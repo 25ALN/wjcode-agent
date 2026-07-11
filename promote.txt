@@ -238,6 +238,11 @@ coder-agent/
 │   ├── service.py             # 框架无关的会话/SSE 服务层
 │   ├── app.py                 # FastAPI 路由适配
 │   └── main.py                # Web API 启动入口
+├── web/
+│   ├── index.html             # 静态前端页面
+│   ├── styles.css             # 前端样式
+│   ├── app.js                 # SSE 客户端与 UI 状态
+│   └── README.md              # 前端启动说明
 ├── main.py                    # 终端对话入口
 ├── AGENT.md                   # 项目级上下文规则
 ├── test_tools.py              # 工具层测试
@@ -328,51 +333,57 @@ coder-agent/
 - Step 3 Permission System：完成并接入 main.py / core/runtime/agent_runtime.py。
 - Step 4 Context Compression：完成并接入 main.py / core/runtime/agent_runtime.py。
 - Step 5 Claude Code 风格工具扩展：`ls` / `grep` / `edit_file` 完成。
-- Step 6 Planning + ReAct 混合执行：完成并接入 main.py / core/runtime/agent_runtime.py / core/context/builder.py。
+- Step 6 Planning + ReAct 混合执行：完成并接入 main.py / core/runtime/agent_runtime.py / core/context/builder.py；复杂任务判定已收紧为“明确行动意图 + 复杂度”，解释/咨询类问题不启动 Planning。
 - TodoList 自动化：`update_todo` 工具完成。
 - TodoList 持久化：`TodoStore` + `.agent_todo.json` 完成。
 
-### 第三阶段：Web 化 + 流式输出 - 后端服务层已完成，页面未开始
+### 第三阶段：Web 化 + 流式输出 - 静态前端已完成
 
 已完成能力：
 
 - `core/runtime/events.py`：定义 `AgentEvent` 和 Web/API 可消费的结构化事件类型，并保留 `core.events` 兼容导出。
-- `AgentRuntime.run_events()`：输出用户消息、模型文本、工具调用、工具结果、Planning 更新、Todo 更新、最终回答等事件。
+- `AgentRuntime.run_events()`：输出用户消息、模型文本、工具调用、工具结果、Planning 更新、Todo 更新、最终回答等事件，并通过工具意图门控避免普通问答暴露 `read_file/grep` 等工具 schema；普通回答模式会禁止并清理 DSML/tool_calls 伪工具协议文本。
 - `AgentRuntime.resume_events()`：为 Web 权限确认后的恢复执行预留入口。
 - `core/permission/web.py`：提供权限挂起、请求序列化、外部批准/拒绝恢复模型，并保留 `core.web_permission` 兼容导出。
-- `core/runtime/session.py`：提供 `AgentSessionManager`，每个 session 独立维护 Runtime、Memory、TodoList、Planning、权限状态，并保留 `core.session` 兼容导出。
+- `core/runtime/session.py`：提供 `AgentSessionManager`，每个 session 独立维护 Runtime、Memory、TodoList、Planning、权限状态；默认系统提示要求概念问答直接回答、项目查看/修改/验证再使用工具，并保留 `core.session` 兼容导出。
 - `edit_file(dry_run=True)`：支持 diff 预览，不实际写文件，便于前端展示修改预览。
 - `server/service.py`：框架无关的 `AgentWebService`，封装 session 创建、消息事件流、SSE 编码、权限请求查询与恢复。
-- `server/app.py`：FastAPI 路由适配，提供 `/health`、`/sessions`、`/sessions/{id}/messages`、`/sessions/{id}/permissions/{request_id}` 等接口。
+- `server/app.py`：FastAPI 路由适配，提供 `/health`、`/sessions`、`/sessions/{id}/messages`、`/sessions/{id}/permissions/{request_id}` 等接口，并直接托管 `/`、`/app.js`、`/styles.css` 静态前端资源；Web 默认 LLM 超时为 30 秒、重试 1 次，可通过 `DEEPSEEK_TIMEOUT` / `DEEPSEEK_RETRY_TIMES` 调整。
 - `server/main.py`：Web API 启动入口，运行 `python3 -m server.main --host 127.0.0.1 --port 8000`。
 - FastAPI/uvicorn 作为可选依赖，未安装时不影响核心 runtime 和服务层单元测试。
+- `web/index.html` / `web/styles.css` / `web/app.js`：静态前端完成，支持会话创建/切换、聊天流、POST SSE 消费、工具调用结果、Todo、Planning、Scratchpad、权限确认和 API 地址配置。
+- 前端体验已增强为三栏 Agent 工作台：聊天区只保留用户/Agent/错误消息，权限请求显示在独立审批卡，thinking/Planning/工具/权限等待进入独立 activity strip，工具调用详情进入右侧 Tool Calls 面板，避免回答内容与执行状态混杂。
+- Agent 回复支持前端 Markdown 渲染，覆盖标题、列表、代码块、引用、表格和链接；请求等待期间显示 thinking 状态，文本事件到达后使用逐字呈现增强流式感。
+- 当前 Web 链路是 SSE 事件流，回答文本仍由 runtime 以 `assistant_text/final` 块级事件发出；真正 token 级流式需要后续新增可兼容 tool_calls 的 delta 事件。
+- 前端无需 Node 构建，启动 `python3 -m server.main --host 127.0.0.1 --port 8000` 后访问 `http://127.0.0.1:8000/`。
 
-尚未开始：
+待真实联调增强：
 
-- 前端目录和页面。
-- Web 权限确认 UI。
-- 工具调用、Todo、Planning 的可视化面板。
+- 安装 FastAPI/uvicorn 后进行浏览器端真实模型调用联调。
+- 根据真实长任务体验微调事件展示、diff 预览和错误提示。
 
 ## 七、下一步实施顺序
 
-第三阶段后端服务层已完成，下一步建议：
+第三阶段静态前端已完成，下一步建议：
 
-1. 进入前端页面：聊天流、工具调用面板、Todo/Planning 面板、权限确认弹窗。
+1. 安装 Web 依赖并进行真实浏览器联调：`pip install fastapi uvicorn`，启动后端后直接访问 `http://127.0.0.1:8000/`。
 2. 为权限系统增加“本次会话始终允许某类操作”的策略。
 3. 为 Planning 状态增加结构化步骤状态，减少 TodoList 与 PlanState 的重复表达。
-4. 后续如需要真实浏览器端双向交互，再补 WebSocket；当前 SSE 已能覆盖消息流和权限恢复。
+4. 后续如需真正 token 级输出，为 `AgentRuntime.run_events()` 增加兼容 Function Calling 的 `assistant_delta` 事件。
+5. 根据真实使用体验补 diff 专用视图、文件树和更细的工具结果折叠。
 
 ## 八、当前验证结果
 
 本次检查运行结果：
 
-- `python3 test_runtime.py`：5 项通过。
+- `./venv/bin/python test_runtime.py`：8 项通过。
 - `python3 test_tools.py`：通过。
-- `python3 test_stage2.py`：27 项通过。
+- `python3 test_stage2.py`：28 项通过。
 - `python3 test_stage3_prep.py`：4 项通过。
-- `python3 test_stage3_server.py`：4 项通过。
-- `python3 -m compileall core llm tools rag server main.py test_tools.py test_stage2.py test_stage3_prep.py test_stage3_server.py test_runtime.py`：通过。
-- `python3 -m pytest test_tools.py test_stage2.py test_stage3_prep.py test_stage3_server.py test_runtime.py -q`：未运行成功，原因是当前 Python 环境未安装 pytest。
-- `./venv/bin/pytest test_tools.py test_stage2.py test_stage3_prep.py test_stage3_server.py test_runtime.py -q`：48 项通过，1 个 pytest warning（`test_registry` 返回了 ToolRegistry 对象）。
+- `./venv/bin/python test_stage3_server.py`：9 项通过。
+- `./venv/bin/python -m compileall core llm tools rag server main.py test_tools.py test_stage2.py test_stage3_prep.py test_stage3_server.py test_runtime.py`：通过。
+- `node --check web/app.js`：通过。
+- `./venv/bin/pytest test_tools.py test_stage2.py test_stage3_prep.py test_stage3_server.py test_runtime.py -q`：57 项通过，2 个 warning（`test_registry` 返回 ToolRegistry 对象；FastAPI TestClient 的 StarletteDeprecationWarning）。
+- 启动 `./venv/bin/python -m server.main --host 127.0.0.1 --port 8000` 后，`GET /`、`GET /app.js`、`GET /styles.css`、`GET /health` 均返回 200。
 
-结论：第一阶段和第二阶段均已完成，第三阶段后端服务层已完成。项目现在具备 Agent Loop、ReAct + Planning 混合执行、工具调用、DuckDuckGo 免费联网搜索、权限确认、项目上下文、结构化长期记忆检索、Todo 追踪/持久化、代码搜索/编辑工具、Scratchpad 显式草稿区、上下文压缩、多会话 Web API、SSE 事件流和权限恢复能力；剩余主要是前端页面与可视化交互。
+结论：第一阶段、第二阶段和第三阶段静态前端均已完成。项目现在具备 Agent Loop、ReAct + Planning 混合执行、按意图暴露工具 schema、解释类问题不误触发 Planning、伪工具协议清理、工具调用、DuckDuckGo 免费联网搜索、权限确认、项目上下文、结构化长期记忆检索、Todo 追踪/持久化、代码搜索/编辑工具、Scratchpad 显式草稿区、上下文压缩、多会话 Web API、SSE 事件流、权限恢复、Markdown 回复渲染、activity strip、thinking 状态和三栏静态 Web UI；剩余主要是真实浏览器联调、token 级 delta 事件、diff 专用视图和更细粒度的工具结果折叠。

@@ -12,13 +12,15 @@ from typing import Optional
 try:
     from fastapi import Body, FastAPI, HTTPException
     from fastapi.middleware.cors import CORSMiddleware
-    from fastapi.responses import StreamingResponse
+    from fastapi.responses import FileResponse, Response, StreamingResponse
     from pydantic import BaseModel, Field
 except ModuleNotFoundError as exc:  # pragma: no cover - exercised only without deps
     Body = None
     FastAPI = None
     HTTPException = None
     CORSMiddleware = None
+    FileResponse = None
+    Response = None
     StreamingResponse = None
     BaseModel = object
     Field = None
@@ -72,9 +74,16 @@ def create_default_service(
     workspace = os.path.abspath(workspace_root or os.getcwd())
     storage = os.path.abspath(storage_root or os.path.join(workspace, ".agent_sessions"))
     model_name = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
+    timeout = int(os.getenv("DEEPSEEK_TIMEOUT", "30"))
+    retry_times = int(os.getenv("DEEPSEEK_RETRY_TIMES", "1"))
 
     def llm_factory():
-        return DeepSeekClient(model_name=model_name, temperature=1)
+        return DeepSeekClient(
+            model_name=model_name,
+            temperature=1,
+            timeout=timeout,
+            retry_times=retry_times,
+        )
 
     manager = AgentSessionManager(
         llm_factory=llm_factory,
@@ -101,7 +110,7 @@ def create_app(service: Optional[AgentWebService] = None):
         origin.strip()
         for origin in os.getenv(
             "AGENT_CORS_ORIGINS",
-            "http://localhost:5173,http://127.0.0.1:5173",
+            "http://localhost:5173,http://127.0.0.1:5173,http://localhost:8001,http://127.0.0.1:8001,http://localhost:8080,http://127.0.0.1:8080",
         ).split(",")
         if origin.strip()
     ]
@@ -115,6 +124,36 @@ def create_app(service: Optional[AgentWebService] = None):
 
     def svc() -> AgentWebService:
         return app.state.agent_service
+
+    web_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "web"))
+
+    def web_file(name: str) -> str:
+        return os.path.join(web_root, name)
+
+    @app.get("/", include_in_schema=False)
+    def frontend_index():
+        index_path = web_file("index.html")
+        if not os.path.exists(index_path):
+            raise HTTPException(status_code=404, detail="web/index.html not found")
+        return FileResponse(index_path, headers={"Cache-Control": "no-store"})
+
+    @app.get("/app.js", include_in_schema=False)
+    def frontend_script():
+        script_path = web_file("app.js")
+        if not os.path.exists(script_path):
+            raise HTTPException(status_code=404, detail="web/app.js not found")
+        return FileResponse(script_path, media_type="application/javascript", headers={"Cache-Control": "no-store"})
+
+    @app.get("/styles.css", include_in_schema=False)
+    def frontend_styles():
+        style_path = web_file("styles.css")
+        if not os.path.exists(style_path):
+            raise HTTPException(status_code=404, detail="web/styles.css not found")
+        return FileResponse(style_path, media_type="text/css", headers={"Cache-Control": "no-store"})
+
+    @app.get("/favicon.ico", include_in_schema=False)
+    def favicon():
+        return Response(status_code=204)
 
     @app.get("/health")
     def health():

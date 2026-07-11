@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from typing import Iterable, Iterator, Optional
 
-from core.events import AgentEvent, ERROR, make_event
+from core.events import AgentEvent, DONE, ERROR, make_event
 from core.session import AgentSession, AgentSessionManager
 from core.web_permission import PendingPermissionRequest
 
@@ -94,7 +94,17 @@ class AgentWebService:
         yield from session.runtime.run_events(message)
 
     def run_message_sse(self, session_id: str, content: str) -> Iterator[str]:
-        yield from iter_sse(self.run_message(session_id, content))
+        try:
+            yield from iter_sse(self.run_message(session_id, content))
+        except AgentWebServiceError:
+            raise
+        except Exception as exc:
+            yield sse_encode(make_event(
+                ERROR,
+                {"message": f"Agent 执行失败: {str(exc)[:200]}"},
+                session_id=session_id,
+            ))
+            yield sse_encode(make_event(DONE, {}, session_id=session_id))
 
     def resolve_permission(
         self,
@@ -116,7 +126,17 @@ class AgentWebService:
         request_id: str,
         approved: bool,
     ) -> Iterator[str]:
-        yield from iter_sse(self.resolve_permission(session_id, request_id, approved))
+        try:
+            yield from iter_sse(self.resolve_permission(session_id, request_id, approved))
+        except AgentWebServiceError:
+            raise
+        except Exception as exc:
+            yield sse_encode(make_event(
+                ERROR,
+                {"message": f"权限恢复执行失败: {str(exc)[:200]}"},
+                session_id=session_id,
+            ))
+            yield sse_encode(make_event(DONE, {}, session_id=session_id))
 
     def error_event(self, message: str, session_id: Optional[str] = None) -> AgentEvent:
         return make_event(ERROR, {"message": message}, session_id=session_id)

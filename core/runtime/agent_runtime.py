@@ -1,4 +1,5 @@
 import logging
+import re
 from typing import List, Optional, Generator, Callable, Any, Dict
 from uuid import uuid4
 from core.message import Message
@@ -25,6 +26,38 @@ from tools.registry import ToolRegistry
 logger = logging.getLogger(__name__)
 
 MAX_TOOL_ROUNDS = 12  # 复杂任务（如分析多文件目录）需要更多工具轮次
+
+TOOL_ACTION_KEYWORDS = (
+    "修复", "修改", "实现", "新增", "添加", "删除", "重构", "接入", "集成",
+    "测试", "运行", "执行", "检查", "调试", "定位", "复现", "报错", "失败",
+    "读取", "打开", "搜索", "查找", "grep", "diff",
+    "补丁", "提交", "联网", "fix", "implement", "refactor", "debug", "test",
+    "run", "execute", "traceback", "exception", "failed", "commit",
+)
+
+TOOL_RESOURCE_KEYWORDS = (
+    "项目", "仓库", "目录", "文件", "源码", "函数", "类", "模块", "接口", "依赖",
+    "配置", "日志", "页面", "前端", "后端", "服务", "路由", "数据库", "api",
+    "网页", "网址", "url", "网站", "错误", "bug",
+)
+
+TOOL_INTENT_KEYWORDS = TOOL_ACTION_KEYWORDS + TOOL_RESOURCE_KEYWORDS
+
+DIRECT_ANSWER_HINTS = (
+    "你觉得", "是什么", "什么是", "为什么", "如何", "怎么", "怎样", "解释",
+    "介绍", "说明", "概念", "原理", "关键", "原则", "建议", "区别",
+    "优缺点", "有办法", "可以", "能否", "是否", "吗",
+)
+
+PSEUDO_TOOL_MARKERS = (
+    "DSML",
+    "tool_calls",
+    "tool_call",
+    "<｜｜",
+    "<|",
+)
+
+CONTINUATION_TOOL_HINTS = ("继续", "接着", "刚才", "上一步", "没完成", "未完成")
 
 
 class AgentRuntime:
@@ -88,7 +121,7 @@ class AgentRuntime:
         if self.planning_manager is not None:
             self._maybe_start_plan(user_input)
 
-        if self.tool_registry and self.tool_registry.tool_count > 0:
+        if self._should_expose_tools(user_input):
             return self._run_with_native_tools()
 
         return self._run_with_callback_tool()
@@ -99,29 +132,73 @@ class AgentRuntime:
             yield self._event(ERROR, {
                 "message": "当前有等待权限确认的工具调用，请先调用 resume_events()",
             })
+            yield self._event(DONE, {})
             return
 
-        user_message = Message(role="user", content=user_input)
-        self.memory.add_message(user_message)
-        self._start_scratchpad(user_input)
-        yield self._event(USER_MESSAGE, {"content": user_input})
+        try:
+            user_message = Message(role="user", content=user_input)
+            self.memory.add_message(user_message)
+            self._start_scratchpad(user_input)
+            yield self._event(USER_MESSAGE, {"content": user_input})
 
-        if self.context_compressor is not None:
-            self._check_and_compress()
+            if self.context_compressor is not None:
+                self._check_and_compress()
 
-        if self.planning_manager is not None:
-            update = self._maybe_start_plan(user_input)
-            if update is not None and update.changed:
-                yield self._event(PLANNING_UPDATE, self._planning_payload(update))
-                yield self._event(TODO_UPDATE, self._todo_payload())
+            if self.planning_manager is not None:
+                update = self._maybe_start_plan(user_input)
+                if update is not None and update.changed:
+                    yield self._event(PLANNING_UPDATE, self._planning_payload(update))
+                    yield self._event(TODO_UPDATE, self._todo_payload())
 
-        if self.tool_registry and self.tool_registry.tool_count > 0:
-            yield from self._run_native_tools_events()
-            return
+            if self._should_expose_tools(user_input):
+                yield from self._run_native_tools_events()
+                return
 
-        reply = self._run_with_callback_tool()
-        yield self._event(FINAL, {"content": reply})
-        yield self._event(DONE, {})
+            yield self._event(ASSISTANT_TEXT, {"content": "", "phase": "model_start"})
+            reply = self._run_with_callback_tool()
+            yield self._event(FINAL, {"content": reply})
+            yield self._event(DONE, {})
+        except Exception as exc:
+            logger.exception("Agent event run failed")
+            yield self._event(ERROR, {"message": f"Agent 执行失败: {str(exc)[:200]}"})
+            yield self._event(DONE, {})
+
+    def _should_expose_tools(self, user_input: str) -> bool:
+        """Decide whether this turn should expose tool schemas to the model.
+
+        General advice/explanation questions should remain plain chat even when
+        a registry exists. Exposing file/code tools on every turn makes models
+        over-eager to call read_file/grep for conceptual questions and can leave
+        the Web UI waiting on unnecessary tool work.
+        """
+        if not self.tool_registry or self.tool_registry.tool_count <= 0:
+            return False
+
+        text = str(user_input or "").strip()
+        if not text:
+            return False
+        lower = text.lower()
+
+        for name in self.tool_registry.list_names():
+            if name and re.search(rf"(?<![\w-]){re.escape(name.lower())}(?![\w-])", lower):
+                return True
+
+        has_direct_answer_hint = any(hint in lower for hint in DIRECT_ANSWER_HINTS)
+        has_action_intent = any(keyword in lower for keyword in TOOL_ACTION_KEYWORDS)
+        has_resource_hint = any(keyword in lower for keyword in TOOL_RESOURCE_KEYWORDS)
+
+        if has_direct_answer_hint and not has_action_intent:
+            return False
+
+        if has_action_intent:
+            return True
+
+        if any(marker in lower for marker in CONTINUATION_TOOL_HINTS):
+            state = getattr(self.planning_manager, "state", None)
+            if state is not None and getattr(state, "mode", "react") == "planning":
+                return True
+
+        return has_resource_hint and not has_direct_answer_hint
 
     def resume_events(self, approved: bool) -> Generator[AgentEvent, None, None]:
         """Resume a paused Web/API run after a permission decision."""
@@ -459,10 +536,19 @@ class AgentRuntime:
             planning_context=planning_context,
             scratchpad_context=scratchpad_context,
         )
+        context.append(Message(
+            role="system",
+            content=(
+                "【本轮执行模式】普通回答模式。当前没有向模型暴露任何工具 schema，"
+                "禁止输出 DSML、tool_calls、invoke、read_file 等任何伪工具调用标记；"
+                "如果用户是在询问机制或概念，请直接用自然语言回答。"
+            ),
+        ))
 
         try:
             response = self.llm.generate(messages=context)
             reply = response if isinstance(response, str) else response.get("text", str(response))
+            reply = self._sanitize_plain_reply(reply, history[-1].content if history else "")
         except Exception as e:
             logger.error(f"LLM 调用失败: {e}")
             reply = f"[抱歉，我遇到了一个错误: {str(e)[:200]}]"
@@ -547,7 +633,14 @@ class AgentRuntime:
             try:
                 return self.long_memory.get_context(query=query)
             except TypeError:
-                return self.long_memory.get_context()
+                try:
+                    return self.long_memory.get_context()
+                except Exception as e:
+                    logger.warning(f"长期记忆上下文获取失败: {e}")
+                    return None
+            except Exception as e:
+                logger.warning(f"长期记忆上下文获取失败: {e}")
+                return None
         return None
 
     def _get_todo_context(self) -> Optional[str]:
@@ -797,7 +890,72 @@ class AgentRuntime:
             logger.error(f"Tool '{name}' 执行异常: {e}")
             return f"[错误] 工具执行异常: {str(e)[:300]}"
 
+    def _sanitize_plain_reply(self, reply: str, user_input: str = "") -> str:
+        text = str(reply or "").strip()
+        if not text:
+            return text
+        if not any(marker in text for marker in PSEUDO_TOOL_MARKERS):
+            return text
+
+        cleaned = re.sub(
+            r"<｜｜DSML｜｜tool_calls>.*?</｜｜DSML｜｜tool_calls>",
+            "",
+            text,
+            flags=re.DOTALL,
+        )
+        cleaned = re.sub(r"<\|[^>]*tool_calls[^>]*>.*?</\|[^>]*tool_calls[^>]*>", "", cleaned, flags=re.DOTALL)
+        cleaned = re.sub(r"<tool_calls?>.*?</tool_calls?>", "", cleaned, flags=re.DOTALL | re.IGNORECASE)
+        cleaned = re.sub(r"<｜｜DSML｜｜invoke.*?</｜｜DSML｜｜invoke>", "", cleaned, flags=re.DOTALL)
+        cleaned = re.sub(r"<｜｜DSML｜｜parameter.*?</｜｜DSML｜｜parameter>", "", cleaned, flags=re.DOTALL)
+        cleaned = "\n".join(
+            line.strip()
+            for line in cleaned.splitlines()
+            if line.strip() and not self._looks_like_tool_preamble(line)
+        ).strip()
+
+        if cleaned and not self._looks_like_tool_preamble(cleaned):
+            return cleaned
+
+        return self._fallback_plain_answer(user_input)
+
+    @staticmethod
+    def _looks_like_tool_preamble(text: str) -> bool:
+        lowered = str(text or "").lower()
+        phrases = (
+            "用实际代码",
+            "看看相关",
+            "查看相关",
+            "先看看",
+            "读取",
+            "read_file",
+            "tool_calls",
+            "invoke",
+            "dsml",
+        )
+        return any(phrase in lowered for phrase in phrases)
+
+    @staticmethod
+    def _fallback_plain_answer(user_input: str) -> str:
+        text = str(user_input or "")
+        lower = text.lower()
+        if "复杂任务" in text or "planning" in lower or "规划" in text:
+            return (
+                "对于复杂任务，我会先进入 Planning 模式，把目标拆成可执行步骤并同步到 Todo；"
+                "随后按步骤进入 ReAct 循环，必要时才调用工具查看、修改或运行项目内容。"
+                "每次工具结果会更新 Scratchpad、Planning 和 Todo；如果观察到错误、失败或权限拒绝，"
+                "会补充验证步骤或重新规划。最后会运行必要检查并给出结果总结。"
+                "像这类询问机制的问题属于普通问答，不应该真实调用工具。"
+            )
+        if "上下文" in text or "context" in lower:
+            return (
+                "上下文由 system prompt、用户消息、历史对话、工具结果、Scratchpad、长期记忆、"
+                "项目上下文、Planning 和 Todo 状态共同组成。运行时会按当前问题检索相关记忆，"
+                "必要时压缩旧历史，并把显式中间状态写入 Scratchpad；普通问答不会触发工具调用。"
+            )
+        return "这个问题属于普通问答，本轮没有实际调用工具。我会直接根据已有上下文用自然语言回答。"
+
     def _finalize_response(self, reply: str) -> str:
+        reply = self._sanitize_plain_reply(reply)
         assistant_message = Message(role="assistant", content=reply)
         self.memory.add_message(assistant_message)
         self._maybe_auto_summarize()

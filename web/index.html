@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Coder Agent</title>
+  <link rel="stylesheet" href="styles.css?v=20260711d">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand-block">
+        <div class="brand-mark">CA</div>
+        <div class="brand-copy">
+          <h1>Coder Agent</h1>
+          <p><span id="connectionDot" class="connection-dot"></span><span id="connectionStatus">未连接</span></p>
+        </div>
+      </div>
+
+      <section class="panel session-panel">
+        <div class="section-title-row">
+          <h2>会话</h2>
+          <button id="newSessionButton" class="small-button primary-subtle" type="button">新建</button>
+        </div>
+        <div id="sessionList" class="session-list"></div>
+      </section>
+
+      <section class="panel api-panel">
+        <div class="section-title-row">
+          <h2>连接</h2>
+          <span id="apiBadge" class="mini-badge">API</span>
+        </div>
+        <label class="field-label" for="apiBaseInput">服务地址</label>
+        <div class="api-row">
+          <input id="apiBaseInput" class="text-input" value="http://127.0.0.1:8000" spellcheck="false">
+          <button id="saveApiButton" class="small-button" type="button">保存</button>
+        </div>
+      </section>
+    </aside>
+
+    <main class="conversation-pane">
+      <header class="topbar">
+        <div class="session-heading">
+          <span class="eyebrow">Workspace Runtime</span>
+          <h2 id="sessionTitle">未选择会话</h2>
+          <p id="runtimeSubtitle">等待连接</p>
+        </div>
+        <div class="topbar-actions">
+          <span id="streamBadge" class="status-chip">idle</span>
+          <button id="refreshButton" class="secondary-button" type="button">刷新</button>
+          <button id="deleteSessionButton" class="danger-button" type="button">关闭</button>
+        </div>
+      </header>
+
+      <section id="permissionBanner" class="approval-card hidden" aria-live="polite">
+        <div class="approval-main">
+          <div class="approval-kicker">等待权限确认</div>
+          <h3 id="permissionTool">工具调用</h3>
+          <p id="permissionReason"></p>
+          <pre id="permissionArgs" class="approval-args"></pre>
+        </div>
+        <div class="approval-actions">
+          <button id="denyPermissionButton" class="secondary-button" type="button">拒绝</button>
+          <button id="allowPermissionButton" class="primary-button" type="button">允许执行</button>
+        </div>
+      </section>
+
+      <section id="activityPanel" class="activity-panel hidden" aria-live="polite">
+        <div class="activity-header">
+          <span id="activityStatus">Thinking</span>
+          <span class="activity-pulse"></span>
+        </div>
+        <div id="activityList" class="activity-list"></div>
+      </section>
+
+      <section id="chatLog" class="chat-log" aria-live="polite"></section>
+
+      <form id="messageForm" class="composer">
+        <textarea id="messageInput" rows="3" placeholder="输入任务或问题"></textarea>
+        <div class="composer-actions">
+          <span id="composerHint" class="composer-hint">Ready</span>
+          <button id="sendButton" class="primary-button" type="submit">发送</button>
+        </div>
+      </form>
+    </main>
+
+    <aside class="inspector">
+      <section class="panel state-panel planning-card">
+        <div class="section-title-row panel-row">
+          <h2>Planning</h2>
+          <span id="planningMode" class="mini-badge">react</span>
+        </div>
+        <div id="planningPanel" class="state-content empty-state">暂无计划</div>
+      </section>
+
+      <section class="panel state-panel">
+        <div class="section-title-row panel-row">
+          <h2>Todo</h2>
+          <span id="todoProgress" class="mini-badge">0%</span>
+        </div>
+        <div id="todoPanel" class="state-content empty-state">暂无任务</div>
+      </section>
+
+      <section class="panel state-panel">
+        <div class="section-title-row panel-row">
+          <h2>Scratchpad</h2>
+        </div>
+        <div id="scratchpadPanel" class="state-content empty-state">暂无草稿</div>
+      </section>
+
+      <section class="panel state-panel tools-card">
+        <div class="section-title-row panel-row">
+          <h2>Tool Calls</h2>
+        </div>
+        <div id="toolPanel" class="tool-list empty-state">暂无工具调用</div>
+      </section>
+    </aside>
+  </div>
+
+  <script src="app.js?v=20260711d" defer></script>
+</body>
+</html>
