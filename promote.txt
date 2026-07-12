@@ -1,6 +1,6 @@
 # Coder Agent 项目规划文档（类 Claude Code）
 
-当前检查日期：2026-06-16
+当前检查日期：2026-07-11
 
 ## 一、项目定位
 
@@ -39,6 +39,10 @@ Thought -> Action(tool call) -> Observation(tool result) -> ... -> Answer
 - 工具调用结果写回短期记忆。
 - 支持 RAG、长期记忆、AGENT.md、TodoList、Planning、Scratchpad 上下文注入。
 - 工具调用错误以 Observation 形式返回，模型可继续修正。
+- 工具 schema 暴露使用 `core.intent` 的词边界匹配，避免 `latest` 误触发 `test`、`runtime` 误触发 `run` 这类英文子串误判。
+- `run_events()` 是 Web/API 和兼容流式输出的 canonical 路径，`stream_run()` 只是薄包装，不再维护第二套执行逻辑。
+- 普通问答追问会使用去工具协议化的历史上下文，避免上一轮 read_file/tool_calls 消息污染下一轮自然语言回答；“模块怎么样了/状态如何”这类状态问答默认不暴露工具；纯伪工具输出或纯检查前置语会针对通用 fallback 做一次严格普通回答重试/回退。
+- 权限恢复会继续完成当前 assistant 返回的整批 `tool_calls`，确保每个 `tool_call_id` 都有对应 tool message 后才再次请求 DeepSeek，避免 HTTP 400 的 insufficient tool messages 错误。
 
 当前限制：
 
@@ -59,7 +63,7 @@ Thought -> Action(tool call) -> Observation(tool result) -> ... -> Answer
 - 发现错误、失败、权限拒绝、Traceback 等结果时追加修正和验证步骤。
 - 写文件或编辑文件后自动补充验证步骤。
 - 计划变化会在同一轮工具循环中重新注入模型上下文，避免只能下一轮才生效。
-- `stream_run()` 也会启动 Planning，后续 Web/流式输出不会和普通 run 行为分裂。
+- `stream_run()` 通过 `run_events()` 启动 Planning，后续 Web/流式输出不会和普通 run 行为分裂。
 
 当前形态：
 
@@ -103,7 +107,7 @@ Thought -> Action(tool call) -> Observation(tool result) -> ... -> Answer
 - `edit_file`
 - `update_todo`
 
-说明：RAG 模块可以保留用于文档类知识检索；代码理解应优先走 `ls/grep/read_file`，小范围修改优先走 `edit_file`，需要全量创建或覆盖文件时再使用 `write_file`。
+说明：RAG 模块可以保留用于文档类知识检索；代码理解应优先走 `ls/grep/read_file`，小范围修改优先走 `edit_file`，需要全量创建或覆盖文件时再使用 `write_file`。文件/项目工具的相对路径统一按 workspace root 解析，而不是进程当前目录。
 
 ### 5. Context Management（上下文管理）- 已完成并持续增强
 
@@ -120,6 +124,7 @@ Thought -> Action(tool call) -> Observation(tool result) -> ... -> Answer
 - `core/context/compression.py`：`ContextCompressor` + `CompressionResult`，并保留 `core.compression` 兼容导出。
 - `AgentRuntime.context_compressor`：达到阈值时触发压缩。
 - Runtime 会用压缩摘要真实替换旧 `ShortMemory`，并把摘要写入 `LongMemory`。
+- `AgentSession` 会把每轮用户可见对话持久化到 `.agent_sessions/<session_id>/history.json`，即使只有一轮会话也可在左侧历史列表恢复；空会话不会作为磁盘历史展示；history 为空但 runtime memory 有可见对话时会兜底回填；这与 LongMemory 摘要和 Context Compression 是分离机制。
 - Runtime 注入长期记忆时会结合当前用户输入和 Planning 目标检索相关记忆，而不是固定注入最近几条。
 - `main.py --rag` 会把 `Retriever.embedder` 传给 LongMemory，避免 RAG 和长期记忆各自重复加载 BGE 模型。
 
@@ -171,13 +176,14 @@ if total_tokens > threshold:
 - `core/permission/manager.py`：`PermissionManager` + `PermissionDecision`，并保留 `core.permission` 包入口导出。
 - `AgentRuntime` 在执行工具前调用 `permission_fn`。
 - `main.py` 在启用工具时创建并注入 `PermissionManager`。
-- 写文件默认限制在项目工作区内，系统路径会被直接阻断。
+- 文件工具相对路径统一按项目工作区解析；系统路径会被直接阻断。
+- 工作区外读取、搜索、列目录和写入不会静默执行，默认进入权限确认；工作区外写入标记为 DANGEROUS，且可通过 `allow_dangerous=False` 策略直接禁止。
 
 权限行为：
 
 - SAFE：`read_file`、`ls`、`grep`、`update_todo`。
 - CAUTION：`web_search`、`write_file`、`edit_file`、`execute_code(python)`。
-- DANGEROUS：`execute_code(shell)`、删除文件、修改工作区外文件、安装依赖、网络写操作。
+- DANGEROUS：`execute_code(shell)`、删除文件、修改工作区外文件（默认需确认，可策略禁止）、安装依赖、网络写操作。
 
 ### 8. AGENT.md（项目级上下文）- 已完成
 
@@ -220,6 +226,7 @@ coder-agent/
 │   ├── permission/
 │   │   ├── manager.py         # 权限分级与用户确认
 │   │   └── web.py             # Web/API 权限挂起与恢复
+│   ├── intent.py              # 工具/Planning 意图词边界匹配
 │   └── *.py                   # 旧导入路径兼容层
 ├── llm/
 │   └── deepseek_client.py     # DeepSeek API，OpenAI 兼容 Function Calling
@@ -333,7 +340,7 @@ coder-agent/
 - Step 3 Permission System：完成并接入 main.py / core/runtime/agent_runtime.py。
 - Step 4 Context Compression：完成并接入 main.py / core/runtime/agent_runtime.py。
 - Step 5 Claude Code 风格工具扩展：`ls` / `grep` / `edit_file` 完成。
-- Step 6 Planning + ReAct 混合执行：完成并接入 main.py / core/runtime/agent_runtime.py / core/context/builder.py；复杂任务判定已收紧为“明确行动意图 + 复杂度”，解释/咨询类问题不启动 Planning。
+- Step 6 Planning + ReAct 混合执行：完成并接入 main.py / core/runtime/agent_runtime.py / core/context/builder.py；复杂任务判定已收紧为“明确行动意图 + 复杂度”，解释/咨询类问题不启动 Planning；英文关键词使用词边界匹配，避免子串误判。
 - TodoList 自动化：`update_todo` 工具完成。
 - TodoList 持久化：`TodoStore` + `.agent_todo.json` 完成。
 
@@ -342,16 +349,16 @@ coder-agent/
 已完成能力：
 
 - `core/runtime/events.py`：定义 `AgentEvent` 和 Web/API 可消费的结构化事件类型，并保留 `core.events` 兼容导出。
-- `AgentRuntime.run_events()`：输出用户消息、模型文本、工具调用、工具结果、Planning 更新、Todo 更新、最终回答等事件，并通过工具意图门控避免普通问答暴露 `read_file/grep` 等工具 schema；普通回答模式会禁止并清理 DSML/tool_calls 伪工具协议文本。
+- `AgentRuntime.run_events()`：输出用户消息、模型文本、工具调用、工具结果、Planning 更新、Todo 更新、最终回答等事件，并通过工具意图门控避免普通问答暴露 `read_file/grep` 等工具 schema；普通回答模式会禁止并清理 DSML/tool_calls 伪工具协议文本；“长期记忆存在哪里/打开旧会话从哪里恢复/请问...”这类机制问答不会因“打开/恢复”等词误触发工具，兜底回答会保留当前用户问题上下文；`stream_run()` 已收敛为其兼容包装；权限恢复会补齐同批所有 tool result 后再继续模型请求。
 - `AgentRuntime.resume_events()`：为 Web 权限确认后的恢复执行预留入口。
 - `core/permission/web.py`：提供权限挂起、请求序列化、外部批准/拒绝恢复模型，并保留 `core.web_permission` 兼容导出。
-- `core/runtime/session.py`：提供 `AgentSessionManager`，每个 session 独立维护 Runtime、Memory、TodoList、Planning、权限状态；默认系统提示要求概念问答直接回答、项目查看/修改/验证再使用工具，并保留 `core.session` 兼容导出。
+- `core/runtime/session.py`：提供 `AgentSessionManager`，每个 session 独立维护 Runtime、Memory、TodoList、Planning、权限状态；每轮将用户可见对话保存到 `history.json`，服务重启后可从 `.agent_sessions` 列出并恢复历史会话；默认系统提示要求概念问答直接回答、项目查看/修改/验证再使用工具，并保留 `core.session` 兼容导出。
 - `edit_file(dry_run=True)`：支持 diff 预览，不实际写文件，便于前端展示修改预览。
-- `server/service.py`：框架无关的 `AgentWebService`，封装 session 创建、消息事件流、SSE 编码、权限请求查询与恢复。
+- `server/service.py`：框架无关的 `AgentWebService`，封装 session 创建、消息事件流、SSE 编码、权限请求查询与恢复，并在 user/final/error 事件到达时写入 session history。
 - `server/app.py`：FastAPI 路由适配，提供 `/health`、`/sessions`、`/sessions/{id}/messages`、`/sessions/{id}/permissions/{request_id}` 等接口，并直接托管 `/`、`/app.js`、`/styles.css` 静态前端资源；Web 默认 LLM 超时为 30 秒、重试 1 次，可通过 `DEEPSEEK_TIMEOUT` / `DEEPSEEK_RETRY_TIMES` 调整。
 - `server/main.py`：Web API 启动入口，运行 `python3 -m server.main --host 127.0.0.1 --port 8000`。
 - FastAPI/uvicorn 作为可选依赖，未安装时不影响核心 runtime 和服务层单元测试。
-- `web/index.html` / `web/styles.css` / `web/app.js`：静态前端完成，支持会话创建/切换、聊天流、POST SSE 消费、工具调用结果、Todo、Planning、Scratchpad、权限确认和 API 地址配置。
+- `web/index.html` / `web/styles.css` / `web/app.js`：静态前端完成，支持会话创建/切换、历史会话侧边栏、聊天记录恢复、聊天流、POST SSE 消费、工具调用结果、Todo、Planning、Scratchpad、权限确认和 API 地址配置。
 - 前端体验已增强为三栏 Agent 工作台：聊天区只保留用户/Agent/错误消息，权限请求显示在独立审批卡，thinking/Planning/工具/权限等待进入独立 activity strip，工具调用详情进入右侧 Tool Calls 面板，避免回答内容与执行状态混杂。
 - Agent 回复支持前端 Markdown 渲染，覆盖标题、列表、代码块、引用、表格和链接；请求等待期间显示 thinking 状态，文本事件到达后使用逐字呈现增强流式感。
 - 当前 Web 链路是 SSE 事件流，回答文本仍由 runtime 以 `assistant_text/final` 块级事件发出；真正 token 级流式需要后续新增可兼容 tool_calls 的 delta 事件。
@@ -367,7 +374,7 @@ coder-agent/
 第三阶段静态前端已完成，下一步建议：
 
 1. 安装 Web 依赖并进行真实浏览器联调：`pip install fastapi uvicorn`，启动后端后直接访问 `http://127.0.0.1:8000/`。
-2. 为权限系统增加“本次会话始终允许某类操作”的策略。
+2. 为权限系统增加“本次会话始终允许某类操作”的策略，并在 Web UI 中展示 workspace 外路径的更醒目风险提示。
 3. 为 Planning 状态增加结构化步骤状态，减少 TodoList 与 PlanState 的重复表达。
 4. 后续如需真正 token 级输出，为 `AgentRuntime.run_events()` 增加兼容 Function Calling 的 `assistant_delta` 事件。
 5. 根据真实使用体验补 diff 专用视图、文件树和更细的工具结果折叠。
@@ -376,14 +383,14 @@ coder-agent/
 
 本次检查运行结果：
 
-- `./venv/bin/python test_runtime.py`：8 项通过。
-- `python3 test_tools.py`：通过。
-- `python3 test_stage2.py`：28 项通过。
-- `python3 test_stage3_prep.py`：4 项通过。
-- `./venv/bin/python test_stage3_server.py`：9 项通过。
+- `./venv/bin/python test_runtime.py`：16 项通过。
+- `./venv/bin/python test_tools.py`：通过（包含 workspace root 相对路径解析回归）。
+- `./venv/bin/python test_stage2.py`：28 项通过。
+- `./venv/bin/python test_stage3_prep.py`：5 项通过。
+- `./venv/bin/python test_stage3_server.py`：11 项通过。
 - `./venv/bin/python -m compileall core llm tools rag server main.py test_tools.py test_stage2.py test_stage3_prep.py test_stage3_server.py test_runtime.py`：通过。
 - `node --check web/app.js`：通过。
-- `./venv/bin/pytest test_tools.py test_stage2.py test_stage3_prep.py test_stage3_server.py test_runtime.py -q`：57 项通过，2 个 warning（`test_registry` 返回 ToolRegistry 对象；FastAPI TestClient 的 StarletteDeprecationWarning）。
+- `./venv/bin/pytest test_tools.py test_stage2.py test_stage3_prep.py test_stage3_server.py test_runtime.py -q`：69 项通过，2 个 warning（`test_registry` 返回 ToolRegistry 对象；FastAPI TestClient 的 StarletteDeprecationWarning）。
 - 启动 `./venv/bin/python -m server.main --host 127.0.0.1 --port 8000` 后，`GET /`、`GET /app.js`、`GET /styles.css`、`GET /health` 均返回 200。
 
-结论：第一阶段、第二阶段和第三阶段静态前端均已完成。项目现在具备 Agent Loop、ReAct + Planning 混合执行、按意图暴露工具 schema、解释类问题不误触发 Planning、伪工具协议清理、工具调用、DuckDuckGo 免费联网搜索、权限确认、项目上下文、结构化长期记忆检索、Todo 追踪/持久化、代码搜索/编辑工具、Scratchpad 显式草稿区、上下文压缩、多会话 Web API、SSE 事件流、权限恢复、Markdown 回复渲染、activity strip、thinking 状态和三栏静态 Web UI；剩余主要是真实浏览器联调、token 级 delta 事件、diff 专用视图和更细粒度的工具结果折叠。
+结论：第一阶段、第二阶段和第三阶段静态前端均已完成。项目现在具备 Agent Loop、ReAct + Planning 混合执行、按意图暴露工具 schema、普通追问去工具协议化历史、状态/机制类问答自然语言回退、长期记忆/历史恢复位置问答不误触发工具、每轮 session history 持久化、空历史过滤、历史会话侧边栏恢复、英文关键词词边界判定、解释类问题不误触发 Planning、`run_events()` 统一事件路径、工作区边界权限确认、权限恢复补齐同批 tool_calls、伪工具协议清理、工具调用、DuckDuckGo 免费联网搜索、权限确认、项目上下文、结构化长期记忆检索、Todo 追踪/持久化、代码搜索/编辑工具、Scratchpad 显式草稿区、上下文压缩、多会话 Web API、SSE 事件流、权限恢复、Markdown 回复渲染、activity strip、thinking 状态和三栏静态 Web UI；剩余主要是真实浏览器联调、token 级 delta 事件、diff 专用视图和更细粒度的工具结果折叠。

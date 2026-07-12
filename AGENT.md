@@ -42,6 +42,7 @@ core/              — 核心能力包
   planning/        — PlanningManager、PlanState、重规划逻辑
   todo/            — TodoList 数据结构与持久化
   permission/      — 权限分级、Web/API 权限挂起与恢复
+  intent.py        — 工具/Planning 意图词边界匹配，避免英文子串误判
   *.py             — 旧导入路径兼容层，例如 core.message/core.compression
 tools/             — 工具层（BaseTool、Registry、File、Code、Web、Project、Todo）
 server/            — FastAPI/SSE Web API 适配层
@@ -58,18 +59,26 @@ promote.txt        — 项目规划文档
 - Tool 必须继承 BaseTool 并定义 name/description/parameters/risk_level
 - Tool-first：代码理解优先使用 `ls` / `grep` / `read_file`，小范围修改优先使用 `edit_file`
 - 工具 schema 必须按本轮意图暴露：普通概念问答不传工具，明确读/改/搜/运行项目内容时才进入工具循环；普通回答模式禁止输出 DSML/tool_calls 等伪工具协议文本
+- 普通回答模式的历史上下文必须去除上一轮原始 `assistant.tool_calls` 和 `tool` 协议消息，只保留用户可见对话；如果模型仍输出纯伪工具调用，只能针对通用 fallback 做一次严格自然语言重试
+- “模块怎么样了/状态如何/长期记忆存在哪里/打开旧会话从哪里恢复/请问...”这类状态或机制问答默认按普通回答处理；包含“打开/恢复”等词也不能仅凭关键词暴露工具；如果模型只输出“我先检查/我先看文件”但没有实际工具调用，应基于当前用户问题回退为直接自然语言答复
+- 工具/Planning 意图匹配必须使用 `core.intent.contains_keyword()` 的词边界逻辑，禁止用裸 substring 判断英文关键词，避免 `latest` 误命中 `test`、`runtime` 误命中 `run`
 - 简单任务走 ReAct；复杂执行任务必须通过 PlanningManager 生成计划，再进入 ReAct 工具循环；解释/咨询类问题即使包含“复杂/规划”等词也不能启动 Planning
 - Planning 状态需要注入上下文；工具 Observation 暴露错误、失败、权限拒绝或代码修改后，应触发计划更新或补充验证步骤
 - Scratchpad 只记录显式中间状态（目标、已确认事实、相关文件、尝试、阻塞、下一步），禁止记录隐藏推理或完整思考链
 - 多步骤任务应通过 PlanningManager 和 `update_todo` 维护任务进度
+- `AgentRuntime.run_events()` 是 Web/API 和兼容流式输出的主路径；`stream_run()` 只能作为薄包装调用 `run_events()`，不能再维护第二套 prompt/tool/permission 逻辑
+- Function Calling 消息顺序必须满足协议：assistant 一旦带 `tool_calls`，下一次模型请求前必须为同一批所有 `tool_call_id` 补齐对应 tool 消息；权限恢复时必须继续完成当前 tool_calls batch，不能只补当前工具就立即请求模型
 - Web/API 层应使用 `server.service.AgentWebService` 暴露会话、SSE 消息流和权限恢复，不直接解析 CLI 文本输出
 - Web/API 默认 LLM 请求避免长时间悬挂：`DEEPSEEK_TIMEOUT` 默认 30 秒，`DEEPSEEK_RETRY_TIMES` 默认 1 次
 - Web UI 当前是 SSE 事件流 + 前端逐字呈现；真正 token 级工具流需要新增 runtime delta 事件，不能绕开 Function Calling/权限链路
 - FastAPI 只作为薄适配层放在 `server/app.py`，核心服务逻辑应保持可单测、不可依赖真实 HTTP 环境
 - Web/API 多会话应通过 `AgentSessionManager` 创建隔离 runtime，每个 session 独立维护 Memory、TodoList、Planning 和权限状态
-- 长期记忆必须使用结构化 `MemoryItem`，注入上下文前应按当前用户输入/Planning 目标检索相关记忆，避免无关历史挤占上下文
+- 每个 Web/API session 必须把用户可见的原始对话写入 `.agent_sessions/<session_id>/history.json`；历史持久化每轮都执行，不能和 8 轮摘要或上下文压缩阈值绑定；空会话不应作为磁盘历史展示，history 为空但 runtime memory 有可见对话时应兜底回填
+- 前端左侧会话列表应从后端持久化 session 列表渲染，选择历史会话时恢复聊天记录并允许继续追问
+- 长期记忆必须使用结构化 `MemoryItem`，注入上下文前应按当前用户输入/Planning 目标检索相关记忆，避免无关历史挤占上下文；不要把 session history、LongMemory 和 Context Compression 混为一层
 - 添加长期记忆时应进行 hash 去重和相似度去重；新摘要必须保留用户目标、文件线索、工具结果、错误和测试结论
 - 启用 RAG 时，长期记忆应复用 `Retriever.embedder`，避免重复加载 BGE 模型；未启用 RAG 时保留本地轻量检索回退
+- 文件类工具的相对路径必须按 session/workspace root 解析；权限系统也必须使用同一 project_root 判断边界，工作区外访问需权限确认，系统路径直接阻断
 - 所有文件操作使用 UTF-8 编码
 - 临时文件使用 tempfile 模块，执行后自动清理
 - LLM Client 之间通过统一接口解耦，切换到其他模型只需实现 generate/stream_generate/count_tokens 即可

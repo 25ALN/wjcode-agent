@@ -20,6 +20,9 @@ RISK_ORDER = {
     DANGEROUS: 2,
 }
 
+PATH_AWARE_TOOLS = {"read_file", "write_file", "edit_file", "ls", "grep"}
+WORKSPACE_WRITE_TOOLS = {"write_file", "edit_file"}
+
 
 @dataclass
 class PermissionDecision:
@@ -128,11 +131,18 @@ class PermissionManager:
         return SAFE, ""
 
     def _check_paths(self, tool_name: str, args: dict) -> Optional[PermissionDecision]:
+        if tool_name not in PATH_AWARE_TOOLS:
+            return None
+
         path = args.get("path")
+        if path is None and tool_name == "ls":
+            path = "."
+        if path is None and tool_name == "grep":
+            path = "."
         if not isinstance(path, str):
             return None
 
-        abs_path = path if os.path.isabs(path) else os.path.abspath(path)
+        abs_path = self._resolve_path(path)
         if self._is_system_path(abs_path):
             return PermissionDecision(
                 tool_name=tool_name,
@@ -141,16 +151,29 @@ class PermissionManager:
                 reason=f"拒绝访问系统路径: {abs_path}",
             )
 
-        if tool_name in {"write_file", "edit_file"} and self.enforce_workspace:
-            if not self._is_inside_project(abs_path):
+        if self.enforce_workspace and not self._is_inside_project(abs_path):
+            risk_level = DANGEROUS if tool_name in WORKSPACE_WRITE_TOOLS else CAUTION
+            if risk_level == DANGEROUS and not self.allow_dangerous:
                 return PermissionDecision(
                     tool_name=tool_name,
-                    risk_level=DANGEROUS,
+                    risk_level=risk_level,
                     allowed=False,
-                    reason=f"拒绝写入工作区外路径: {abs_path}",
+                    reason=f"拒绝访问工作区外路径: {abs_path}",
                 )
+            return PermissionDecision(
+                tool_name=tool_name,
+                risk_level=risk_level,
+                allowed=True,
+                reason=f"访问工作区外路径需要确认: {abs_path}",
+                requires_approval=self.require_approval,
+            )
 
         return None
+
+    def _resolve_path(self, path: str) -> str:
+        if os.path.isabs(path):
+            return os.path.abspath(path)
+        return os.path.abspath(os.path.join(self.project_root, path))
 
     def _is_inside_project(self, path: str) -> bool:
         try:

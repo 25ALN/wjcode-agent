@@ -91,7 +91,9 @@ class AgentWebService:
         session = self.get_session(session_id)
         message = self._validate_content(content)
         session.touch()
-        yield from session.runtime.run_events(message)
+        for event in session.runtime.run_events(message):
+            session.record_event(event)
+            yield event
 
     def run_message_sse(self, session_id: str, content: str) -> Iterator[str]:
         try:
@@ -118,7 +120,9 @@ class AgentWebService:
                 f"permission request cannot be resolved: {request_id}"
             )
         session.touch()
-        yield from session.runtime.resume_events(bool(approved))
+        for event in session.runtime.resume_events(bool(approved)):
+            session.record_event(event)
+            yield event
 
     def resolve_permission_sse(
         self,

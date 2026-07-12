@@ -32,15 +32,18 @@ class LSTool(BaseTool):
     parameters = {
         "type": "object",
         "properties": {
-            "path": {"type": "string", "description": "要列出的目录，默认当前目录。"},
+            "path": {"type": "string", "description": "要列出的目录，默认工作区根目录。"},
             "recursive": {"type": "boolean", "description": "是否递归列出子目录，默认 false。"},
             "max_entries": {"type": "integer", "description": "最多返回条目数，默认 200。"},
         },
         "required": [],
     }
 
+    def __init__(self, workspace_root: str | None = None):
+        self.workspace_root = os.path.abspath(workspace_root or os.getcwd())
+
     def execute(self, path: str = ".", recursive: bool = False, max_entries: int = 200, **kwargs) -> str:
-        root = _resolve_path(path)
+        root = _resolve_path(path, self.workspace_root)
         if not os.path.exists(root):
             return f"[错误] 路径不存在: {root}"
         if not os.path.isdir(root):
@@ -98,6 +101,9 @@ class GrepTool(BaseTool):
         "required": ["pattern"],
     }
 
+    def __init__(self, workspace_root: str | None = None):
+        self.workspace_root = os.path.abspath(workspace_root or os.getcwd())
+
     def execute(
         self,
         pattern: str,
@@ -106,7 +112,7 @@ class GrepTool(BaseTool):
         max_results: int = 100,
         **kwargs,
     ) -> str:
-        root = _resolve_path(path)
+        root = _resolve_path(path, self.workspace_root)
         if not os.path.exists(root):
             return f"[错误] 路径不存在: {root}"
 
@@ -160,6 +166,9 @@ class EditTool(BaseTool):
         "required": ["path", "start_line", "end_line", "new_content"],
     }
 
+    def __init__(self, workspace_root: str | None = None):
+        self.workspace_root = os.path.abspath(workspace_root or os.getcwd())
+
     def execute(
         self,
         path: str,
@@ -169,7 +178,7 @@ class EditTool(BaseTool):
         dry_run: bool = False,
         **kwargs,
     ) -> str:
-        abs_path = _resolve_path(path)
+        abs_path = _resolve_path(path, self.workspace_root)
         if not os.path.exists(abs_path):
             return f"[错误] 文件不存在: {abs_path}"
         if not os.path.isfile(abs_path):
@@ -226,8 +235,11 @@ class EditTool(BaseTool):
         )
 
 
-def _resolve_path(path: str) -> str:
-    return path if os.path.isabs(path) else os.path.abspath(path)
+def _resolve_path(path: str, workspace_root: str | None = None) -> str:
+    if os.path.isabs(path):
+        return os.path.abspath(path)
+    root = os.path.abspath(workspace_root or os.getcwd())
+    return os.path.abspath(os.path.join(root, path))
 
 
 def _clamp(value: int, low: int, high: int) -> int:

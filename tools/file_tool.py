@@ -30,7 +30,7 @@ class FileReadTool(BaseTool):
                 "type": "string",
                 "description": (
                     "要读取的文件路径。可以是绝对路径（如 /home/user/file.txt）"
-                    "或相对于当前工作目录的路径（如 src/main.py）"
+                    "或相对于工作区根目录的路径（如 src/main.py）"
                 ),
             },
             "start_line": {
@@ -51,6 +51,9 @@ class FileReadTool(BaseTool):
         },
         "required": ["path"],
     }
+
+    def __init__(self, workspace_root: Optional[str] = None):
+        self.workspace_root = os.path.abspath(workspace_root or os.getcwd())
 
     def execute(
         self,
@@ -126,10 +129,10 @@ class FileReadTool(BaseTool):
         return "\n".join(result_parts)
 
     def _resolve_path(self, path: str) -> str:
-        """解析路径：如果 path 是相对路径，相对于当前工作目录"""
+        """解析路径：如果 path 是相对路径，相对于工作区根目录。"""
         if os.path.isabs(path):
-            return path
-        return os.path.abspath(path)
+            return os.path.abspath(path)
+        return os.path.abspath(os.path.join(self.workspace_root, path))
 
 
 class FileWriteTool(BaseTool):
@@ -156,7 +159,7 @@ class FileWriteTool(BaseTool):
             "path": {
                 "type": "string",
                 "description": (
-                    "要写入的文件路径。可以是绝对路径或相对路径。"
+                    "要写入的文件路径。可以是绝对路径或相对于工作区根目录的路径。"
                     "如果父目录不存在会自动创建。"
                 ),
             },
@@ -175,6 +178,9 @@ class FileWriteTool(BaseTool):
         },
         "required": ["path", "content"],
     }
+
+    def __init__(self, workspace_root: Optional[str] = None):
+        self.workspace_root = os.path.abspath(workspace_root or os.getcwd())
 
     def execute(
         self,
@@ -227,10 +233,10 @@ class FileWriteTool(BaseTool):
             return f"[错误] 写入文件失败: {e}"
 
     def _resolve_path(self, path: str) -> str:
-        """解析路径：如果 path 是相对路径，相对于当前工作目录"""
+        """解析路径：如果 path 是相对路径，相对于工作区根目录。"""
         if os.path.isabs(path):
-            return path
-        return os.path.abspath(path)
+            return os.path.abspath(path)
+        return os.path.abspath(os.path.join(self.workspace_root, path))
 
     @staticmethod
     def _is_restricted_path(path: str) -> bool:

@@ -106,13 +106,13 @@ def build_runtime(use_tools: bool = False, use_rag: bool = False) -> AgentRuntim
 
     if use_tools:
         registry = ToolRegistry()
-        registry.register(FileReadTool())
-        registry.register(FileWriteTool())
+        registry.register(FileReadTool(workspace_root=project_root))
+        registry.register(FileWriteTool(workspace_root=project_root))
         registry.register(CodeExecutorTool())
         registry.register(WebSearchTool())
-        registry.register(LSTool())
-        registry.register(GrepTool())
-        registry.register(EditTool())
+        registry.register(LSTool(workspace_root=project_root))
+        registry.register(GrepTool(workspace_root=project_root))
+        registry.register(EditTool(workspace_root=project_root))
         registry.register(TodoUpdateTool(todo, todo_store))
         permission_manager = PermissionManager(
             tool_registry=registry,

@@ -1,4 +1,5 @@
 const STORAGE_KEY = "agent.apiBase";
+const SESSION_KEY = "agent.sessionId";
 
 function defaultApiBase() {
   const protocol = window.location.protocol;
@@ -15,7 +16,7 @@ function defaultApiBase() {
 
 const state = {
   apiBase: localStorage.getItem(STORAGE_KEY) || defaultApiBase(),
-  sessionId: null,
+  sessionId: localStorage.getItem(SESSION_KEY) || null,
   sessions: [],
   tools: [],
   pendingPermission: null,
@@ -201,6 +202,30 @@ function clearChat() {
   clearActivity();
   el.chatLog.innerHTML = "";
   renderEmptyChat();
+}
+
+function renderHistoryMessages(messages) {
+  cancelTypingAnimations();
+  clearActivity();
+  el.chatLog.innerHTML = "";
+  const list = Array.isArray(messages) ? messages : [];
+  if (!list.length) {
+    renderEmptyChat();
+    return;
+  }
+
+  for (const message of list) {
+    const role = message.role || "assistant";
+    const content = message.content || "";
+    if (!content) continue;
+    if (role === "user") {
+      addMessage("user", "你", content, message.timestamp);
+    } else if (role === "error") {
+      addMessage("error", "错误", content, message.timestamp);
+    } else {
+      addMessage("assistant", "Agent", content, message.timestamp, { markdown: true });
+    }
+  }
 }
 
 function safeLinkUrl(url) {
@@ -505,19 +530,27 @@ function renderSessions() {
     button.className = `session-button${session.session_id === state.sessionId ? " active" : ""}`;
     button.title = session.session_id;
     const updated = formatSessionTime(session.updated_at || session.created_at);
+    const title = session.title || `Session ${shortId(session.session_id)}`;
+    const count = session.history_messages || session.memory_messages || 0;
+    const preview = session.last_message || "暂无消息";
     button.innerHTML = `
-      <span class="session-id">${escapeText(shortId(session.session_id))}</span>
-      <span class="session-meta">${escapeText(String(session.memory_messages || 0))} messages${updated ? ` · ${escapeText(updated)}` : ""}</span>
+      <span class="session-title">${escapeText(title)}</span>
+      <span class="session-meta">${escapeText(String(count))} messages${updated ? ` · ${escapeText(updated)}` : ""}</span>
+      <span class="session-preview">${escapeText(preview)}</span>
     `;
     button.addEventListener("click", () => selectSession(session.session_id));
     el.sessionList.appendChild(button);
   }
 }
 
-function renderSnapshot(snapshot) {
+function renderSnapshot(snapshot, options = {}) {
   state.sessionId = snapshot.session_id;
-  el.sessionTitle.textContent = `Session ${shortId(snapshot.session_id)}`;
-  el.runtimeSubtitle.textContent = snapshot.workspace_root || "Workspace";
+  if (state.sessionId) localStorage.setItem(SESSION_KEY, state.sessionId);
+  const title = snapshot.title || `Session ${shortId(snapshot.session_id)}`;
+  el.sessionTitle.textContent = title;
+  const count = snapshot.history_messages || snapshot.memory_messages || 0;
+  el.runtimeSubtitle.textContent = `${snapshot.workspace_root || "Workspace"}${count ? ` · ${count} messages` : ""}`;
+  if (options.renderMessages) renderHistoryMessages(snapshot.messages || []);
   renderPlanning(snapshot.planning);
   renderTodo(snapshot.todo, typeof snapshot.todo_progress === "number" ? snapshot.todo_progress : null);
   renderScratchpad(snapshot.scratchpad);
@@ -694,9 +727,16 @@ async function loadSessions() {
   const payload = await requestJson("/sessions");
   state.sessions = payload.sessions || [];
   renderSessions();
-  if (!state.sessionId && state.sessions.length) {
-    await selectSession(state.sessions[0].session_id);
+  if (!state.sessions.length) {
+    state.sessionId = null;
+    localStorage.removeItem(SESSION_KEY);
+    return;
   }
+
+  const preferred = state.sessions.find((session) => session.session_id === state.sessionId);
+  const target = preferred ? preferred.session_id : state.sessions[0].session_id;
+  state.sessionId = null;
+  await selectSession(target, true);
 }
 
 async function createSession() {
@@ -707,7 +747,7 @@ async function createSession() {
     state.tools = [];
     clearChat();
     renderTools();
-    renderSnapshot(snapshot);
+    renderSnapshot(snapshot, { renderMessages: true });
     setStatus("已连接", "connected");
   } catch (error) {
     addMessage("error", "错误", error.message);
@@ -717,15 +757,15 @@ async function createSession() {
   }
 }
 
-async function selectSession(sessionId) {
-  if (sessionId === state.sessionId && state.sessionId) return;
+async function selectSession(sessionId, force = false) {
+  if (!force && sessionId === state.sessionId && state.sessionId) return;
   setBusy(true);
   try {
     const snapshot = await requestJson(`/sessions/${encodeURIComponent(sessionId)}`);
     state.tools = [];
     clearChat();
     renderTools();
-    renderSnapshot(snapshot);
+    renderSnapshot(snapshot, { renderMessages: true });
     setStatus("已连接", "connected");
   } catch (error) {
     addMessage("error", "错误", error.message);
@@ -742,6 +782,7 @@ async function deleteSession() {
   try {
     await request(`/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" });
     state.sessionId = null;
+    localStorage.removeItem(SESSION_KEY);
     state.sessions = state.sessions.filter((session) => session.session_id !== sessionId);
     state.tools = [];
     clearChat();
@@ -817,7 +858,7 @@ async function refreshSnapshot() {
   const index = state.sessions.findIndex((session) => session.session_id === snapshot.session_id);
   if (index >= 0) state.sessions[index] = snapshot;
   else state.sessions.unshift(snapshot);
-  renderSnapshot(snapshot);
+  renderSnapshot(snapshot, { renderMessages: false });
 }
 
 async function consumeSse(path, options) {

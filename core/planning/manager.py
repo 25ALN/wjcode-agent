@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any, List, Optional
 
 from core.todo import TodoList
+from core.intent import contains_keyword
 
 logger = logging.getLogger(__name__)
 
@@ -32,12 +33,18 @@ ACTION_KEYWORDS = (
     "编写",
     "继续",
     "fix",
+    "fixing",
     "refactor",
     "implement",
     "integrate",
     "run",
+    "runs",
+    "running",
     "test",
+    "tests",
+    "testing",
     "debug",
+    "debugging",
 )
 
 COMPLEX_KEYWORDS = (
@@ -70,6 +77,17 @@ EXPLANATION_HINTS = (
     "是否",
     "能否",
     "可以",
+    "what is",
+    "what are",
+    "why",
+    "how",
+    "explain",
+    "describe",
+    "concept",
+    "difference",
+    "should",
+    "can",
+    "could",
 )
 
 OBSERVATION_ERROR_KEYWORDS = (
@@ -134,8 +152,8 @@ class PlanningManager:
             return False
 
         lower = text.lower()
-        has_action = any(keyword.lower() in lower for keyword in ACTION_KEYWORDS)
-        has_explanation = any(keyword.lower() in lower for keyword in EXPLANATION_HINTS)
+        has_action = contains_keyword(lower, ACTION_KEYWORDS)
+        has_explanation = contains_keyword(lower, EXPLANATION_HINTS)
 
         # “复杂任务如何处理”这类是机制解释，不是需要拆解执行的复杂任务。
         if has_explanation and not has_action:
@@ -147,7 +165,7 @@ class PlanningManager:
         if len(text) >= self.min_complex_length:
             return True
 
-        return any(keyword.lower() in lower for keyword in COMPLEX_KEYWORDS)
+        return contains_keyword(lower, COMPLEX_KEYWORDS)
 
     def start_or_update_plan(
         self,

@@ -5,6 +5,7 @@ from uuid import uuid4
 from core.message import Message
 from core.memory import ShortMemory, LongMemory
 from core.context import Scratchpad, build_context
+from core.intent import contains_keyword, looks_like_file_reference
 from core.events import (
     AgentEvent,
     ASSISTANT_TEXT,
@@ -31,22 +32,32 @@ TOOL_ACTION_KEYWORDS = (
     "修复", "修改", "实现", "新增", "添加", "删除", "重构", "接入", "集成",
     "测试", "运行", "执行", "检查", "调试", "定位", "复现", "报错", "失败",
     "读取", "打开", "搜索", "查找", "grep", "diff",
-    "补丁", "提交", "联网", "fix", "implement", "refactor", "debug", "test",
-    "run", "execute", "traceback", "exception", "failed", "commit",
+    "补丁", "提交", "联网", "fix", "fixing", "implement", "refactor",
+    "debug", "debugging", "test", "tests", "testing", "run", "runs", "running",
+    "execute", "executing", "traceback", "exception", "failed", "commit", "open",
+    "read", "search", "find",
+)
+
+TOOL_SOFT_ACTION_KEYWORDS = (
+    "查看", "看一下", "分析", "inspect", "show", "view",
 )
 
 TOOL_RESOURCE_KEYWORDS = (
     "项目", "仓库", "目录", "文件", "源码", "函数", "类", "模块", "接口", "依赖",
     "配置", "日志", "页面", "前端", "后端", "服务", "路由", "数据库", "api",
-    "网页", "网址", "url", "网站", "错误", "bug",
+    "网页", "网址", "url", "网站", "错误", "bug", "readme",
 )
 
-TOOL_INTENT_KEYWORDS = TOOL_ACTION_KEYWORDS + TOOL_RESOURCE_KEYWORDS
+TOOL_INTENT_KEYWORDS = TOOL_ACTION_KEYWORDS + TOOL_SOFT_ACTION_KEYWORDS + TOOL_RESOURCE_KEYWORDS
 
 DIRECT_ANSWER_HINTS = (
     "你觉得", "是什么", "什么是", "为什么", "如何", "怎么", "怎样", "解释",
     "介绍", "说明", "概念", "原理", "关键", "原则", "建议", "区别",
-    "优缺点", "有办法", "可以", "能否", "是否", "吗",
+    "优缺点", "有办法", "可以", "能否", "是否", "吗", "哪里", "哪儿",
+    "在哪", "在哪里", "从哪里", "存储在哪里", "保存在哪里", "怎么样", "怎么样了",
+    "状态", "现状", "情况", "目前", "最近", "恢复", "what is",
+    "what are", "why", "how", "explain", "describe", "concept", "difference",
+    "should", "can", "could",
 )
 
 PSEUDO_TOOL_MARKERS = (
@@ -105,6 +116,9 @@ class AgentRuntime:
         self.scratchpad = scratchpad or Scratchpad()
         self.session_id = session_id or uuid4().hex
         self._pending_tool_call: Optional[dict] = None
+        self._pending_function_calls: Optional[List[dict]] = None
+        self._pending_function_index = 0
+        self._pending_plan_changed = False
         self._pending_context: Optional[List[Message]] = None
         self._pending_tools: Optional[List[Dict[str, Any]]] = None
         self._pending_tool_round = 0
@@ -183,22 +197,125 @@ class AgentRuntime:
             if name and re.search(rf"(?<![\w-]){re.escape(name.lower())}(?![\w-])", lower):
                 return True
 
-        has_direct_answer_hint = any(hint in lower for hint in DIRECT_ANSWER_HINTS)
-        has_action_intent = any(keyword in lower for keyword in TOOL_ACTION_KEYWORDS)
-        has_resource_hint = any(keyword in lower for keyword in TOOL_RESOURCE_KEYWORDS)
+        has_direct_answer_hint = contains_keyword(lower, DIRECT_ANSWER_HINTS)
+        has_hard_action = contains_keyword(lower, TOOL_ACTION_KEYWORDS)
+        has_soft_action = contains_keyword(lower, TOOL_SOFT_ACTION_KEYWORDS)
+        has_resource_hint = contains_keyword(lower, TOOL_RESOURCE_KEYWORDS) or looks_like_file_reference(lower)
+        has_action_intent = has_hard_action or (has_soft_action and has_resource_hint)
 
-        if has_direct_answer_hint and not has_action_intent:
+        if has_direct_answer_hint and not self._is_explicit_tool_request(
+            lower,
+            has_hard_action=has_hard_action,
+            has_soft_action=has_soft_action,
+            has_resource_hint=has_resource_hint,
+        ):
             return False
 
         if has_action_intent:
             return True
 
-        if any(marker in lower for marker in CONTINUATION_TOOL_HINTS):
+        if contains_keyword(lower, CONTINUATION_TOOL_HINTS):
             state = getattr(self.planning_manager, "state", None)
             if state is not None and getattr(state, "mode", "react") == "planning":
                 return True
 
         return has_resource_hint and not has_direct_answer_hint
+
+    def _is_explicit_tool_request(
+        self,
+        lower_text: str,
+        has_hard_action: bool,
+        has_soft_action: bool,
+        has_resource_hint: bool,
+    ) -> bool:
+        """Return True only when a direct-question turn still asks us to act.
+
+        Questions like “长期记忆存在哪里、打开历史从哪里恢复” contain words
+        such as “打开” but are asking for an explanation, not file inspection.
+        """
+        has_action = has_hard_action or has_soft_action
+        if not has_action:
+            return False
+        if looks_like_file_reference(lower_text):
+            return True
+
+        location_question_hints = (
+            "哪里",
+            "哪儿",
+            "在哪",
+            "在哪里",
+            "从哪里",
+            "存储在哪里",
+            "保存在哪里",
+        )
+        internal_mechanism_terms = (
+            "记忆",
+            "memory",
+            "历史",
+            "历史记录",
+            "会话",
+            "上下文",
+            "context",
+            "planning",
+            "todo",
+            "scratchpad",
+        )
+        if (
+            contains_keyword(lower_text, location_question_hints)
+            and contains_keyword(lower_text, internal_mechanism_terms)
+            and not looks_like_file_reference(lower_text)
+            and not contains_keyword(lower_text, TOOL_RESOURCE_KEYWORDS)
+        ):
+            return False
+
+        imperative_prefixes = (
+            "检查",
+            "查看",
+            "读取",
+            "打开",
+            "搜索",
+            "查找",
+            "运行",
+            "测试",
+            "修改",
+            "修复",
+            "实现",
+            "分析",
+            "调试",
+            "定位",
+            "复现",
+            "新增",
+            "添加",
+            "删除",
+            "重构",
+        )
+        request_prefixes = (
+            "请你",
+            "请帮我",
+            "请帮忙",
+            "帮我",
+            "帮忙",
+            "麻烦你",
+            "麻烦",
+            "需要你",
+            "你需要",
+            "给我",
+            "能不能",
+            "能否",
+            "可以帮我",
+            "可不可以",
+        )
+        candidates = [lower_text]
+        stripped = lower_text.lstrip()
+        for prefix in request_prefixes:
+            if stripped.startswith(prefix):
+                candidates.append(stripped[len(prefix):].lstrip(" ，,。:："))
+                break
+
+        return any(
+            candidate.startswith(imperative_prefixes) and (has_resource_hint or has_hard_action)
+            for candidate in candidates
+        )
 
     def resume_events(self, approved: bool) -> Generator[AgentEvent, None, None]:
         """Resume a paused Web/API run after a permission decision."""
@@ -209,12 +326,18 @@ class AgentRuntime:
         context = self._pending_context
         tools = self._pending_tools
         function_call = self._pending_tool_call
+        function_calls = self._pending_function_calls or ([function_call] if function_call else [])
+        function_index = self._pending_function_index
+        plan_changed = self._pending_plan_changed
         tool_round = self._pending_tool_round
         pending_text = self._pending_text
 
         self._pending_context = None
         self._pending_tools = None
         self._pending_tool_call = None
+        self._pending_function_calls = None
+        self._pending_function_index = 0
+        self._pending_plan_changed = False
         self._pending_tool_round = 0
         self._pending_text = None
 
@@ -222,17 +345,25 @@ class AgentRuntime:
             yield self._event(ERROR, {"message": "等待恢复的上下文已丢失"})
             return
 
-        tool_msg, plan_changed = self._complete_tool_call(function_call, bool(approved))
-        self.memory.add_message(tool_msg)
-        context.append(tool_msg)
+        plan_changed = yield from self._process_tool_call_batch_events(
+            context=context,
+            tools=tools,
+            function_calls=function_calls,
+            start_index=function_index,
+            tool_round=tool_round,
+            pending_text=pending_text,
+            plan_changed=plan_changed,
+            first_permission_override=bool(approved),
+            emit_start_tool_call=False,
+        )
+        if plan_changed is None:
+            return
+
+        self._append_batch_context_updates(context, plan_changed)
         if plan_changed:
-            refreshed_plan = self._get_planning_context()
-            if refreshed_plan:
-                context.append(self._planning_context_message(refreshed_plan))
             yield self._event(PLANNING_UPDATE, self._current_planning_payload())
             yield self._event(TODO_UPDATE, self._todo_payload())
 
-        yield self._event(TOOL_RESULT, self._tool_result_payload(tool_msg))
         yield from self._continue_native_tools_events(context, tools, tool_round, pending_text)
 
     def _run_with_native_tools(self) -> str:
@@ -416,34 +547,20 @@ class AgentRuntime:
                 self.memory.add_message(fn_call_msg)
                 context.append(fn_call_msg)
 
-                plan_changed = False
+                plan_changed = yield from self._process_tool_call_batch_events(
+                    context=context,
+                    tools=tools,
+                    function_calls=function_calls,
+                    start_index=0,
+                    tool_round=tool_round,
+                    pending_text=pending_text,
+                    plan_changed=False,
+                )
+                if plan_changed is None:
+                    return
 
-                for function_call in function_calls:
-                    yield self._event(TOOL_CALL, self._tool_call_payload(function_call))
-                    try:
-                        tool_msg, changed = self._complete_tool_call(function_call)
-                    except PermissionPending as pending:
-                        self._pending_tool_call = function_call
-                        self._pending_context = context
-                        self._pending_tools = tools
-                        self._pending_tool_round = tool_round
-                        self._pending_text = pending_text
-                        yield self._event(PERMISSION_REQUEST, pending.request.to_dict())
-                        return
-
-                    self.memory.add_message(tool_msg)
-                    context.append(tool_msg)
-                    plan_changed = changed or plan_changed
-                    yield self._event(TOOL_RESULT, self._tool_result_payload(tool_msg))
-
-                refreshed_scratchpad = self._get_scratchpad_context()
-                if refreshed_scratchpad:
-                    context.append(self._scratchpad_context_message(refreshed_scratchpad))
-
+                self._append_batch_context_updates(context, plan_changed)
                 if plan_changed:
-                    refreshed_plan = self._get_planning_context()
-                    if refreshed_plan:
-                        context.append(self._planning_context_message(refreshed_plan))
                     yield self._event(PLANNING_UPDATE, self._current_planning_payload())
                     yield self._event(TODO_UPDATE, self._todo_payload())
                 continue
@@ -466,6 +583,92 @@ class AgentRuntime:
         yield self._event(ERROR, {
             "message": f"Agent 调用工具次数过多（{MAX_TOOL_ROUNDS}次），已中止",
         })
+
+    def _process_tool_call_batch_events(
+        self,
+        context: List[Message],
+        tools: List[Dict[str, Any]],
+        function_calls: List[dict],
+        start_index: int,
+        tool_round: int,
+        pending_text: Optional[str],
+        plan_changed: bool = False,
+        first_permission_override: Optional[bool] = None,
+        emit_start_tool_call: bool = True,
+    ) -> Generator[AgentEvent, None, Optional[bool]]:
+        """Execute pending tool calls from one assistant tool_calls message.
+
+        OpenAI/DeepSeek require every assistant message with tool_calls to be
+        followed by one tool message for each tool_call_id before the next model
+        request. If permission pauses in the middle of a batch, resume must
+        finish the same batch instead of immediately calling the model again.
+        """
+        if not function_calls:
+            return plan_changed
+
+        for index in range(start_index, len(function_calls)):
+            function_call = function_calls[index]
+            if index == start_index and first_permission_override is not None:
+                permission_override = first_permission_override
+                emit_tool_call = emit_start_tool_call
+            else:
+                permission_override = None
+                emit_tool_call = True
+
+            if emit_tool_call:
+                yield self._event(TOOL_CALL, self._tool_call_payload(function_call))
+
+            try:
+                tool_msg, changed = self._complete_tool_call(function_call, permission_override)
+            except PermissionPending as pending:
+                self._store_pending_tool_batch(
+                    context=context,
+                    tools=tools,
+                    function_calls=function_calls,
+                    function_index=index,
+                    tool_round=tool_round,
+                    pending_text=pending_text,
+                    plan_changed=plan_changed,
+                )
+                yield self._event(PERMISSION_REQUEST, pending.request.to_dict())
+                return None
+
+            self.memory.add_message(tool_msg)
+            context.append(tool_msg)
+            plan_changed = changed or plan_changed
+            yield self._event(TOOL_RESULT, self._tool_result_payload(tool_msg))
+
+        return plan_changed
+
+    def _store_pending_tool_batch(
+        self,
+        context: List[Message],
+        tools: List[Dict[str, Any]],
+        function_calls: List[dict],
+        function_index: int,
+        tool_round: int,
+        pending_text: Optional[str],
+        plan_changed: bool,
+    ) -> None:
+        function_call = function_calls[function_index]
+        self._pending_tool_call = function_call
+        self._pending_function_calls = function_calls
+        self._pending_function_index = function_index
+        self._pending_plan_changed = plan_changed
+        self._pending_context = context
+        self._pending_tools = tools
+        self._pending_tool_round = tool_round
+        self._pending_text = pending_text
+
+    def _append_batch_context_updates(self, context: List[Message], plan_changed: bool) -> None:
+        refreshed_scratchpad = self._get_scratchpad_context()
+        if refreshed_scratchpad:
+            context.append(self._scratchpad_context_message(refreshed_scratchpad))
+
+        if plan_changed:
+            refreshed_plan = self._get_planning_context()
+            if refreshed_plan:
+                context.append(self._planning_context_message(refreshed_plan))
 
     @staticmethod
     def _normalize_llm_response(response: Any) -> Dict[str, Any]:
@@ -508,14 +711,16 @@ class AgentRuntime:
         return tool_result[:limit] + trunc_note
 
     def _run_with_callback_tool(self) -> str:
-        history = self.memory.get_recent_messages()
+        raw_history = self.memory.get_recent_messages()
+        history = self._plain_chat_history(raw_history)
+        user_text = self._last_user_content(history)
         rag_results = self._get_rag()
         planning_context = self._get_planning_context()
 
         tool_results = None
         if self.tool_fn:
             try:
-                tool_result = self.tool_fn(history[-1].content if history else "")
+                tool_result = self.tool_fn(user_text)
                 tool_results = [tool_result] if tool_result else None
             except Exception as e:
                 logger.warning(f"Tool 执行失败: {e}")
@@ -536,78 +741,140 @@ class AgentRuntime:
             planning_context=planning_context,
             scratchpad_context=scratchpad_context,
         )
-        context.append(Message(
-            role="system",
-            content=(
-                "【本轮执行模式】普通回答模式。当前没有向模型暴露任何工具 schema，"
-                "禁止输出 DSML、tool_calls、invoke、read_file 等任何伪工具调用标记；"
-                "如果用户是在询问机制或概念，请直接用自然语言回答。"
-            ),
-        ))
+        context.append(self._plain_answer_mode_message())
 
         try:
             response = self.llm.generate(messages=context)
-            reply = response if isinstance(response, str) else response.get("text", str(response))
-            reply = self._sanitize_plain_reply(reply, history[-1].content if history else "")
+            raw_reply = response if isinstance(response, str) else response.get("text", str(response))
+            reply = self._sanitize_plain_reply(raw_reply, user_text)
+            if self._is_generic_plain_fallback(reply, user_text) and self._contains_pseudo_tool_text(raw_reply):
+                retry = self._retry_plain_answer(context, user_text)
+                if (
+                    retry
+                    and not self._is_plain_fallback(retry, user_text)
+                    and not self._is_invalid_plain_retry(retry)
+                ):
+                    reply = retry
         except Exception as e:
             logger.error(f"LLM 调用失败: {e}")
             reply = f"[抱歉，我遇到了一个错误: {str(e)[:200]}]"
 
         return self._finalize_response(reply)
 
-    def stream_run(self, user_input: str) -> Generator[str, None, None]:
-        user_message = Message(role="user", content=user_input)
-        self.memory.add_message(user_message)
-        self._start_scratchpad(user_input)
+    def _plain_chat_history(self, messages: List[Message]) -> List[Message]:
+        """Return chat history suitable for a no-tools answer turn.
 
-        if self.context_compressor is not None:
-            self._check_and_compress()
+        Previous native tool runs store assistant messages with function_calls
+        and tool result messages so the next tool round can satisfy the API
+        protocol. For a plain follow-up, sending those protocol messages back
+        tends to make the model emit read_file/tool_calls text again. Keep the
+        user-visible conversation and drop the transport-level tool protocol.
+        """
+        plain: List[Message] = []
+        for msg in messages:
+            if msg.role == "tool":
+                continue
+            metadata = msg.metadata or {}
+            if msg.role == "assistant" and (
+                metadata.get("function_calls") or metadata.get("function_call")
+            ):
+                continue
+            if msg.role not in {"user", "assistant", "system"}:
+                continue
+            plain.append(Message(
+                role=msg.role,
+                content=msg.content,
+                timestamp=msg.timestamp,
+                metadata={},
+                name=msg.name,
+            ))
+        return plain
 
-        if self.planning_manager is not None:
-            self._maybe_start_plan(user_input)
+    @staticmethod
+    def _last_user_content(messages: List[Message]) -> str:
+        for msg in reversed(messages):
+            if msg.role == "user":
+                return msg.content
+        return ""
 
-        history = self.memory.get_recent_messages()
-        rag_results = self._get_rag()
-        planning_context = self._get_planning_context()
-
-        tool_results = None
-        if self.tool_fn:
-            try:
-                tool_result = self.tool_fn(user_input)
-                tool_results = [tool_result] if tool_result else None
-            except Exception as e:
-                logger.warning(f"Tool 执行失败: {e}")
-                tool_results = [f"[Tool 执行出错: {e}]"]
-
-        long_memory_context = self._get_long_memory_context()
-        todo_context = self._get_todo_context()
-        scratchpad_context = self._get_scratchpad_context()
-
-        context = build_context(
-            system_prompt=self.system_prompt,
-            messages=history,
-            rag_results=rag_results,
-            tool_results=tool_results,
-            long_memory_context=long_memory_context,
-            project_context=self.project_context,
-            todo_context=todo_context,
-            planning_context=planning_context,
-            scratchpad_context=scratchpad_context,
+    @staticmethod
+    def _plain_answer_mode_message() -> Message:
+        return Message(
+            role="system",
+            content=(
+                "【本轮执行模式】普通回答模式。当前没有向模型暴露任何工具 schema，"
+                "禁止输出 DSML、tool_calls、invoke、read_file 等任何伪工具调用标记；"
+                "不要说‘本轮没有实际调用工具’这类占位话术。"
+                "如果用户是在追问刚才的项目分析，请基于已有对话结论直接回答观点、理由和取舍。"
+            ),
         )
 
-        full_reply = ""
+    def _retry_plain_answer(self, context: List[Message], user_input: str) -> str:
+        retry_context = list(context)
+        retry_context.append(Message(
+            role="system",
+            content=(
+                "上一条输出仍然像工具调用草稿。请忽略任何工具调用意图，"
+                "只用自然语言直接回答用户问题；不要提 read_file、tool_calls 或权限。"
+            ),
+        ))
+        retry_context.append(Message(
+            role="user",
+            content=f"请直接回答这个问题：{user_input}",
+        ))
         try:
-            for chunk in self.llm.stream_generate(messages=context):
-                full_reply += chunk
-                yield chunk
+            response = self.llm.generate(messages=retry_context)
+            raw_reply = response if isinstance(response, str) else response.get("text", str(response))
+            return self._sanitize_plain_reply(raw_reply, user_input)
         except Exception as e:
-            error_msg = f"[生成失败: {e}]"
-            full_reply = error_msg
-            yield error_msg
+            logger.warning(f"普通回答重试失败: {e}")
+            return ""
 
-        assistant_message = Message(role="assistant", content=full_reply)
-        self.memory.add_message(assistant_message)
-        self._maybe_auto_summarize()
+    @staticmethod
+    def _contains_pseudo_tool_text(reply: str) -> bool:
+        text = str(reply or "")
+        return any(marker in text for marker in PSEUDO_TOOL_MARKERS)
+
+    def _is_plain_fallback(self, reply: str, user_input: str) -> bool:
+        return str(reply or "").strip() == self._fallback_plain_answer(user_input).strip()
+
+    def _is_generic_plain_fallback(self, reply: str, user_input: str) -> bool:
+        fallback = self._fallback_plain_answer(user_input).strip()
+        return (
+            str(reply or "").strip() == fallback
+            and fallback.startswith("这个问题属于普通问答")
+        )
+
+    @staticmethod
+    def _is_invalid_plain_retry(reply: str) -> bool:
+        text = str(reply or "").strip().lower()
+        if not text:
+            return True
+        invalid_markers = (
+            "[no more responses]",
+            "[抱歉，我遇到了一个错误",
+            "agent 未返回有效响应",
+        )
+        return any(marker in text for marker in invalid_markers)
+
+    def stream_run(self, user_input: str) -> Generator[str, None, None]:
+        """Compatibility streaming facade built on the canonical event loop.
+
+        The old implementation had a separate prompt/tool path. Keeping this
+        method as a thin wrapper ensures CLI/legacy callers get the same
+        Planning, permission, memory, and pseudo-tool cleanup behavior as Web.
+        """
+        for event in self.run_events(user_input):
+            if event.type == FINAL:
+                content = event.data.get("content", "")
+                if content:
+                    yield content
+            elif event.type == ERROR:
+                message = event.data.get("message", "未知错误")
+                yield f"[错误] {message}"
+            elif event.type == PERMISSION_REQUEST:
+                tool_name = event.data.get("tool_name", "工具调用")
+                yield f"[等待权限确认] {tool_name} 需要用户批准后才能继续。"
 
     def _get_rag(self) -> Optional[List[str]]:
         if not self.rag_fn:
@@ -895,6 +1162,8 @@ class AgentRuntime:
         if not text:
             return text
         if not any(marker in text for marker in PSEUDO_TOOL_MARKERS):
+            if self._looks_like_tool_preamble(text):
+                return self._fallback_plain_answer(user_input)
             return text
 
         cleaned = re.sub(
@@ -926,6 +1195,12 @@ class AgentRuntime:
             "看看相关",
             "查看相关",
             "先看看",
+            "先看一下",
+            "让我先看",
+            "让我先检查",
+            "我现在来检查",
+            "让我检查",
+            "先检查",
             "读取",
             "read_file",
             "tool_calls",
@@ -952,10 +1227,29 @@ class AgentRuntime:
                 "项目上下文、Planning 和 Todo 状态共同组成。运行时会按当前问题检索相关记忆，"
                 "必要时压缩旧历史，并把显式中间状态写入 Scratchpad；普通问答不会触发工具调用。"
             )
+        if any(keyword in text for keyword in ("记忆", "memory", "历史记录", "历史", "长期记忆", "会话", "session")):
+            storage_answer = (
+                "记忆和历史现在分两层保存：Web/API 会话的用户可见聊天记录保存在 "
+                "`.agent_sessions/<session_id>/history.json`，左侧历史会话列表和重新打开页面主要从这里恢复；"
+                "长期记忆 `LongMemory` 保存在 `.agent_sessions/<session_id>/memory_long.json`，"
+                "用于结构化保存摘要、事实、偏好、测试结论等可检索信息；Todo 状态保存在 "
+                "`.agent_sessions/<session_id>/todo.json`。打开旧会话时，`AgentSessionManager` 会扫描 "
+                "`.agent_sessions`，读取对应的 `history.json` 恢复可见对话，并把 user/assistant 历史放回短期记忆以支持继续追问。"
+            )
+            if any(keyword in text for keyword in ("哪里", "哪儿", "在哪", "从哪里", "存储", "保存", "恢复")):
+                return storage_answer
+            return (
+                "记忆模块目前已经不是只等 8 轮后才摘要保存：用户可见会话历史会逐轮持久化，"
+                "长期记忆会结构化保存并按当前问题检索相关内容。"
+                f"{storage_answer}"
+            )
         return "这个问题属于普通问答，本轮没有实际调用工具。我会直接根据已有上下文用自然语言回答。"
 
-    def _finalize_response(self, reply: str) -> str:
-        reply = self._sanitize_plain_reply(reply)
+    def _finalize_response(self, reply: str, user_input: str = "") -> str:
+        if not user_input:
+            last_user = self.memory.get_last_user_message()
+            user_input = last_user.content if last_user else ""
+        reply = self._sanitize_plain_reply(reply, user_input)
         assistant_message = Message(role="assistant", content=reply)
         self.memory.add_message(assistant_message)
         self._maybe_auto_summarize()
