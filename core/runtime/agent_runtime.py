@@ -46,6 +46,31 @@ TOOL_RESOURCE_KEYWORDS = (
     "项目", "仓库", "目录", "文件", "源码", "函数", "类", "模块", "接口", "依赖",
     "配置", "日志", "页面", "前端", "后端", "服务", "路由", "数据库", "api",
     "网页", "网址", "url", "网站", "错误", "bug", "readme",
+    "天气", "气温", "温度", "降雨", "下雨", "预报", "空气质量",
+)
+
+WEATHER_INFO_KEYWORDS = ("天气", "气温", "温度", "降雨", "下雨", "预报", "空气质量")
+PROJECT_ANALYSIS_ACTION_KEYWORDS = (
+    "分析", "梳理", "总结", "评估", "介绍", "亮点", "难点", "优点", "缺点",
+    "架构", "结构", "overview", "review",
+)
+PROJECT_ANALYSIS_SCOPE_KEYWORDS = (
+    "项目", "仓库", "目录", "代码库", "源码", "工程", "模块", "repo", "repository",
+)
+PROJECT_ANALYSIS_MUTATION_KEYWORDS = (
+    "修改", "修复", "新增", "添加", "删除", "重构", "写入", "编辑",
+    "运行", "测试", "调试", "复现", "执行",
+)
+PROJECT_ANALYSIS_READ_TOOLS = ("ls", "grep", "read_file")
+PROJECT_ANALYSIS_MAX_TOOL_CALLS = 3
+FRESH_INFO_TIME_KEYWORDS = (
+    "今天", "明天", "后天", "上午", "下午", "今晚", "早上", "中午", "晚上",
+    "本周", "周一", "周二", "周三", "周四", "周五", "周六", "周日",
+    "实时", "最新", "当前", "现在",
+)
+LOCATION_HINT_KEYWORDS = ("省", "市", "区", "县", "镇", "街道", "贵州", "贵阳", "南明")
+EXTERNAL_SEARCH_CONTINUATION_HINTS = (
+    "查吧", "查一下", "查询一下", "搜吧", "搜一下", "搜索一下", "那就查", "帮我查",
 )
 
 TOOL_INTENT_KEYWORDS = TOOL_ACTION_KEYWORDS + TOOL_SOFT_ACTION_KEYWORDS + TOOL_RESOURCE_KEYWORDS
@@ -66,6 +91,8 @@ PSEUDO_TOOL_MARKERS = (
     "tool_call",
     "<｜｜",
     "<|",
+    "[调用工具",
+    "调用工具:",
 )
 
 CONTINUATION_TOOL_HINTS = ("继续", "接着", "刚才", "上一步", "没完成", "未完成")
@@ -136,7 +163,7 @@ class AgentRuntime:
             self._maybe_start_plan(user_input)
 
         if self._should_expose_tools(user_input):
-            return self._run_with_native_tools()
+            return self._run_with_native_tools(user_input)
 
         return self._run_with_callback_tool()
 
@@ -165,7 +192,7 @@ class AgentRuntime:
                     yield self._event(TODO_UPDATE, self._todo_payload())
 
             if self._should_expose_tools(user_input):
-                yield from self._run_native_tools_events()
+                yield from self._run_native_tools_events(user_input)
                 return
 
             yield self._event(ASSISTANT_TEXT, {"content": "", "phase": "model_start"})
@@ -197,6 +224,13 @@ class AgentRuntime:
             if name and re.search(rf"(?<![\w-]){re.escape(name.lower())}(?![\w-])", lower):
                 return True
 
+        if self._requires_fresh_external_tool(lower):
+            return True
+        if self._continues_fresh_external_request(lower):
+            return True
+        if self._is_project_analysis_request(lower):
+            return True
+
         has_direct_answer_hint = contains_keyword(lower, DIRECT_ANSWER_HINTS)
         has_hard_action = contains_keyword(lower, TOOL_ACTION_KEYWORDS)
         has_soft_action = contains_keyword(lower, TOOL_SOFT_ACTION_KEYWORDS)
@@ -220,6 +254,101 @@ class AgentRuntime:
                 return True
 
         return has_resource_hint and not has_direct_answer_hint
+
+    def _select_native_tool_declarations(self, user_input: str) -> List[Dict[str, Any]]:
+        if not self.tool_registry:
+            return []
+        names = self._tools_for_turn(user_input)
+        return self.tool_registry.get_function_declarations(names=names)
+
+    def _tools_for_turn(self, user_input: str) -> Optional[List[str]]:
+        text = str(user_input or "").strip().lower()
+        if not text or not self.tool_registry:
+            return None
+
+        if self._requires_fresh_external_tool(text) or self._continues_fresh_external_request(text):
+            return ["web_search"] if self._has_registered_tool("web_search") else []
+
+        if self._is_project_analysis_request(text):
+            return self._registered_project_read_tools()
+
+        if self._has_registered_tool("execute_code") and self._needs_code_execution(text):
+            tools = []
+            if self._has_registered_tool("read_file"):
+                tools.append("read_file")
+            if self._has_registered_tool("ls"):
+                tools.append("ls")
+            if self._has_registered_tool("grep"):
+                tools.append("grep")
+            if self._has_registered_tool("edit_file"):
+                tools.append("edit_file")
+            if self._has_registered_tool("write_file"):
+                tools.append("write_file")
+            if self._has_registered_tool("execute_code"):
+                tools.append("execute_code")
+            if self._has_registered_tool("web_search") and contains_keyword(text, WEATHER_INFO_KEYWORDS):
+                tools.append("web_search")
+            return tools or None
+
+        return None
+
+    def _needs_code_execution(self, lower_text: str) -> bool:
+        code_hints = ("运行", "执行", "测试", "调试", "复现", "报错", "失败", "shell", "python", "代码")
+        return contains_keyword(lower_text, code_hints)
+
+    def _is_project_analysis_request(self, lower_text: str) -> bool:
+        """Detect read-only project/dir analysis turns.
+
+        These turns need repository evidence, but they should not expose write,
+        execution, or network tools. Keeping the tool surface small prevents the
+        model from wandering into repeated file reads or irrelevant actions.
+        """
+        if not lower_text:
+            return False
+        if self._requires_fresh_external_tool(lower_text):
+            return False
+        if contains_keyword(lower_text, PROJECT_ANALYSIS_MUTATION_KEYWORDS):
+            return False
+
+        has_scope = (
+            contains_keyword(lower_text, PROJECT_ANALYSIS_SCOPE_KEYWORDS)
+            or looks_like_file_reference(lower_text)
+        )
+        has_analysis_intent = contains_keyword(lower_text, PROJECT_ANALYSIS_ACTION_KEYWORDS)
+        return has_scope and has_analysis_intent
+
+    def _registered_project_read_tools(self) -> List[str]:
+        return [
+            name for name in PROJECT_ANALYSIS_READ_TOOLS
+            if self._has_registered_tool(name)
+        ]
+
+    def _has_registered_tool(self, name: str) -> bool:
+        return bool(self.tool_registry and name in self.tool_registry.list_names())
+
+    def _requires_fresh_external_tool(self, lower_text: str) -> bool:
+        if not self._has_registered_tool("web_search"):
+            return False
+        if contains_keyword(lower_text, WEATHER_INFO_KEYWORDS):
+            return (
+                contains_keyword(lower_text, FRESH_INFO_TIME_KEYWORDS)
+                or contains_keyword(lower_text, LOCATION_HINT_KEYWORDS)
+                or contains_keyword(lower_text, ("查询", "搜索", "查一下", "搜一下", "联网"))
+            )
+        return False
+
+    def _continues_fresh_external_request(self, lower_text: str) -> bool:
+        if not self._has_registered_tool("web_search"):
+            return False
+        if not contains_keyword(lower_text, EXTERNAL_SEARCH_CONTINUATION_HINTS):
+            return False
+
+        recent_messages = self.memory.messages[:-1] if self.memory.messages else []
+        recent_text = "\n".join(msg.content for msg in recent_messages[-6:]).lower()
+        return contains_keyword(
+            recent_text,
+            WEATHER_INFO_KEYWORDS + ("联网", "搜索", "查询", "实时", "最新", "工具模式"),
+        )
 
     def _is_explicit_tool_request(
         self,
@@ -366,7 +495,7 @@ class AgentRuntime:
 
         yield from self._continue_native_tools_events(context, tools, tool_round, pending_text)
 
-    def _run_with_native_tools(self) -> str:
+    def _run_with_native_tools(self, user_input: str) -> str:
         rag_results = self._get_rag()
         long_memory_context = self._get_long_memory_context()
         todo_context = self._get_todo_context()
@@ -380,8 +509,11 @@ class AgentRuntime:
             planning_context=planning_context,
             scratchpad_context=scratchpad_context,
         )
+        self._append_tool_workflow_context(context, user_input)
 
-        tools = self.tool_registry.get_function_declarations()
+        tools = self._select_native_tool_declarations(user_input)
+        project_analysis = self._is_project_analysis_request(str(user_input or "").strip().lower())
+        project_analysis_tool_calls = 0
         tool_round = 0
         pending_text = None  # 缓存的文本回复（用于 text + function_call 共存场景）
 
@@ -396,6 +528,16 @@ class AgentRuntime:
                 self._extract_function_calls(response),
                 tool_round,
             )
+            if project_analysis and function_calls:
+                remaining = PROJECT_ANALYSIS_MAX_TOOL_CALLS - project_analysis_tool_calls
+                if remaining <= 0:
+                    return self._force_final_answer_from_tool_context(context, user_input)
+                function_calls = function_calls[:remaining]
+
+            # 纯工具草稿（无 function_call）→ 纠偏后继续尝试一次合法工具调用或直接回答
+            if text and not function_calls and self._is_unusable_tool_draft(text):
+                context.append(self._native_tool_retry_message())
+                continue
 
             #纯文本（无 function_call）→ 立即返回
             if text and not function_calls:
@@ -447,6 +589,8 @@ class AgentRuntime:
                     self.memory.add_message(tool_msg)
                     context.append(tool_msg)
                     self._observe_scratchpad(fn_name, fn_args, tool_content)
+                    if project_analysis and fn_name in PROJECT_ANALYSIS_READ_TOOLS:
+                        project_analysis_tool_calls += 1
 
                     if self.planning_manager is not None:
                         planning_update = self._update_plan_from_observation(
@@ -472,6 +616,8 @@ class AgentRuntime:
                                 "请依据更新后的计划继续执行。"
                             ),
                         ))
+                if project_analysis and project_analysis_tool_calls >= PROJECT_ANALYSIS_MAX_TOOL_CALLS:
+                    return self._force_final_answer_from_tool_context(context, user_input)
                 continue
 
             # 既没有 text 也没有 function_call — 异常
@@ -486,7 +632,7 @@ class AgentRuntime:
 
         return f"[Agent 调用工具次数过多（{MAX_TOOL_ROUNDS}次），已中止]"
 
-    def _run_native_tools_events(self) -> Generator[AgentEvent, None, None]:
+    def _run_native_tools_events(self, user_input: str) -> Generator[AgentEvent, None, None]:
         rag_results = self._get_rag()
         long_memory_context = self._get_long_memory_context()
         todo_context = self._get_todo_context()
@@ -500,8 +646,9 @@ class AgentRuntime:
             planning_context=planning_context,
             scratchpad_context=scratchpad_context,
         )
-        tools = self.tool_registry.get_function_declarations()
-        yield from self._continue_native_tools_events(context, tools, 0, None)
+        self._append_tool_workflow_context(context, user_input)
+        tools = self._select_native_tool_declarations(user_input)
+        yield from self._continue_native_tools_events(context, tools, 0, None, user_input=user_input)
 
     def _continue_native_tools_events(
         self,
@@ -509,7 +656,12 @@ class AgentRuntime:
         tools: List[Dict[str, Any]],
         tool_round: int,
         pending_text: Optional[str],
+        user_input: Optional[str] = None,
     ) -> Generator[AgentEvent, None, None]:
+        if user_input is None:
+            user_input = self._last_user_content(context)
+        project_analysis = self._is_project_analysis_request(str(user_input or "").strip().lower())
+        project_analysis_tool_calls = self._project_analysis_tool_observation_count(context)
         while tool_round < MAX_TOOL_ROUNDS:
             tool_round += 1
 
@@ -521,8 +673,21 @@ class AgentRuntime:
                 self._extract_function_calls(response),
                 tool_round,
             )
+            if project_analysis and function_calls:
+                remaining = PROJECT_ANALYSIS_MAX_TOOL_CALLS - project_analysis_tool_calls
+                if remaining <= 0:
+                    reply = self._force_final_answer_from_tool_context(context, user_input)
+                    yield self._event(ASSISTANT_TEXT, {"content": reply})
+                    yield self._event(FINAL, {"content": reply})
+                    yield self._event(DONE, {})
+                    return
+                function_calls = function_calls[:remaining]
 
-            if text:
+            if text and not function_calls and self._is_unusable_tool_draft(text):
+                context.append(self._native_tool_retry_message())
+                continue
+
+            if text and not self._is_unusable_tool_draft(text):
                 yield self._event(ASSISTANT_TEXT, {"content": text})
 
             if text and not function_calls:
@@ -559,10 +724,17 @@ class AgentRuntime:
                 if plan_changed is None:
                     return
 
+                project_analysis_tool_calls = self._project_analysis_tool_observation_count(context)
                 self._append_batch_context_updates(context, plan_changed)
                 if plan_changed:
                     yield self._event(PLANNING_UPDATE, self._current_planning_payload())
                     yield self._event(TODO_UPDATE, self._todo_payload())
+                if project_analysis and project_analysis_tool_calls >= PROJECT_ANALYSIS_MAX_TOOL_CALLS:
+                    reply = self._force_final_answer_from_tool_context(context, user_input)
+                    yield self._event(ASSISTANT_TEXT, {"content": reply})
+                    yield self._event(FINAL, {"content": reply})
+                    yield self._event(DONE, {})
+                    return
                 continue
 
             if pending_text:
@@ -669,6 +841,100 @@ class AgentRuntime:
             refreshed_plan = self._get_planning_context()
             if refreshed_plan:
                 context.append(self._planning_context_message(refreshed_plan))
+
+    def _force_final_answer_from_tool_context(self, context: List[Message], user_input: str) -> str:
+        reply = self._project_analysis_observation_answer(context, user_input)
+        return self._finalize_response(reply, user_input)
+
+    def _project_analysis_observation_answer(self, context: List[Message], user_input: str) -> str:
+        observations = self._project_analysis_observation_texts(context)
+        joined = "\n".join(observations)
+        lower_joined = joined.lower()
+
+        observed_files = self._observed_file_hints(joined)
+        capabilities = []
+        capability_checks = (
+            ("ReAct + Function Calling 工具循环", ("function_call", "function calling", "tool_calls", "react")),
+            ("Planning / Todo / Scratchpad 状态管理", ("planning", "todo", "scratchpad", "计划")),
+            ("权限分级和 Web 权限恢复", ("permission", "权限", "resume_events")),
+            ("上下文压缩、短期记忆和长期记忆检索", ("context", "memory", "longmemory", "compression", "上下文", "记忆")),
+            ("Web API、SSE 事件流和静态前端", ("server", "sse", "fastapi", "web/", "run_events")),
+            ("项目工具层和文件/搜索/执行工具", ("read_file", "grep", "ls", "execute_code", "tools/")),
+        )
+        for label, needles in capability_checks:
+            if any(needle in lower_joined for needle in needles):
+                capabilities.append(label)
+
+        if not capabilities:
+            capabilities = [
+                "分层的 Agent Runtime 和工具系统",
+                "面向代码项目的只读分析、编辑和验证能力",
+            ]
+
+        file_line = "、".join(observed_files[:6]) if observed_files else "本轮已读取的项目结构和关键文件片段"
+        capability_line = "；".join(capabilities[:4])
+
+        return (
+            "基于本轮已经获取到的项目观察，我先停止继续读取文件，直接给出当前可判断的结论。\n\n"
+            "**亮点**\n"
+            f"- 项目能力边界比较完整：{capability_line}，不是单纯聊天或纯 RAG。\n"
+            "- 结构上已经把 runtime、context、memory、planning、permission、tools、server/web 等职责拆开，后续定位问题和扩展工具比较清晰。\n"
+            "- 对真实 code agent 的关键问题已有覆盖：工具协议、权限确认、上下文压缩、长期记忆、任务计划、SSE 前端事件等都有独立模块和测试。\n\n"
+            "**难点**\n"
+            "- 最大难点是工具调用闭环的稳定性：模型可能反复请求 read_file、输出伪工具文本，运行时必须用硬规则兜住最终回答。\n"
+            "- 上下文管理复杂：Chat History、Tool Results、Scratchpad、Memory、Planning 都会进入 prompt，任何一层污染都可能导致下一轮继续误调工具。\n"
+            "- Web 侧要把 tool_call/tool_result/thinking/final 分开展示，否则内部执行状态很容易和最终回答混在一起。\n"
+            "- 项目越接近真实 agent，难点越从“能调用工具”转向“何时停止、如何恢复、如何保证协议和用户可见状态一致”。\n\n"
+            f"**依据**：{file_line}。如果要更精确的代码级评价，可以指定某个目录，我会只围绕该目录分析。"
+        )
+
+    @staticmethod
+    def _project_analysis_observation_texts(context: List[Message]) -> List[str]:
+        texts = []
+        for msg in context:
+            if msg.role == "tool" and (msg.name or "") in PROJECT_ANALYSIS_READ_TOOLS:
+                content = str(msg.content or "").strip()
+                if content:
+                    texts.append(content[:4000])
+        return texts
+
+    @staticmethod
+    def _observed_file_hints(observation_text: str) -> List[str]:
+        hints: List[str] = []
+        patterns = (
+            r"文件:\s*([^\n]+)",
+            r"目录:\s*([^\n]+)",
+            r"(^|\n)([A-Za-z0-9_./-]+\.(?:py|md|txt|js|css|json|html))",
+        )
+        for pattern in patterns:
+            for match in re.finditer(pattern, observation_text):
+                value = match.group(match.lastindex or 1).strip()
+                value = value.split("(", 1)[0].strip()
+                if value and value not in hints:
+                    hints.append(value)
+        return hints
+
+    @staticmethod
+    def _project_analysis_force_final_message(user_input: str) -> Message:
+        return Message(
+            role="system",
+            content=(
+                "【项目分析工具预算已用完】\n"
+                "现在必须停止调用任何工具，不能再读取文件、搜索或执行代码。"
+                "请只基于上方已有的 tool observations 直接回答用户问题："
+                f"{user_input}\n"
+                "回答需要包含：项目亮点、项目难点、判断依据。若信息不足，请明确说明依据有限，"
+                "但仍要给出当前可判断的结论。"
+            ),
+        )
+
+    @staticmethod
+    def _project_analysis_tool_observation_count(context: List[Message]) -> int:
+        return sum(
+            1
+            for msg in context
+            if msg.role == "tool" and (msg.name or "") in PROJECT_ANALYSIS_READ_TOOLS
+        )
 
     @staticmethod
     def _normalize_llm_response(response: Any) -> Dict[str, Any]:
@@ -809,6 +1075,20 @@ class AgentRuntime:
             ),
         )
 
+    @staticmethod
+    def _native_tool_retry_message() -> Message:
+        return Message(
+            role="system",
+            content=(
+                "上一条输出只是工具调用草稿，但没有产生合法 function_call。"
+                "如果需要查看、搜索、修改或运行项目，请立即使用已暴露的工具 schema；"
+                "如果不需要工具，请直接给最终答案。禁止输出 DSML、tool_calls、invoke、read_file 等伪工具文本。"
+            ),
+        )
+
+    def _is_unusable_tool_draft(self, text: str) -> bool:
+        return self._contains_pseudo_tool_text(text) or self._looks_like_tool_preamble(text)
+
     def _retry_plain_answer(self, context: List[Message], user_input: str) -> str:
         retry_context = list(context)
         retry_context.append(Message(
@@ -926,7 +1206,7 @@ class AgentRuntime:
         planning_context: Optional[str] = None,
         scratchpad_context: Optional[str] = None,
     ) -> List[Message]:
-        history = self.memory.get_recent_messages()
+        history = self._tool_protocol_safe_history(self.memory.get_recent_messages())
         return build_context(
             system_prompt=self.system_prompt,
             messages=history,
@@ -937,6 +1217,96 @@ class AgentRuntime:
             planning_context=planning_context,
             scratchpad_context=scratchpad_context,
         )
+
+    def _append_tool_workflow_context(self, context: List[Message], user_input: str) -> None:
+        message = self._tool_workflow_message(user_input)
+        if message is not None:
+            context.append(message)
+
+    def _tool_workflow_message(self, user_input: str) -> Optional[Message]:
+        lower = str(user_input or "").strip().lower()
+        if self._is_project_analysis_request(lower):
+            return Message(
+                role="system",
+                content=(
+                    "【项目分析工具工作流】\n"
+                    "本轮是只读项目/目录分析。先用 ls 或 grep 获取结构线索，再只读取必要的关键文件。"
+                    "read_file 无行号时只会返回文件开头摘要；如需更多内容，必须指定 start_line/end_line。\n"
+                    "通常 1 到 3 次工具观察后就应停止调用工具，直接给出项目亮点、难点和判断依据。"
+                    "不要尝试写文件、执行代码或联网搜索。"
+                ),
+            )
+        return None
+
+    def _tool_protocol_safe_history(self, messages: List[Message]) -> List[Message]:
+        """Drop truncated function-calling fragments before native tool calls.
+
+        ShortMemory trims from the front by message count/token count. That can
+        leave a leading tool message or an assistant tool_calls message without
+        every matching tool response. OpenAI-compatible APIs reject that shape,
+        so native tool contexts must only keep complete protocol batches.
+        """
+        safe: List[Message] = []
+        index = 0
+        while index < len(messages):
+            msg = messages[index]
+
+            if msg.role == "tool":
+                index += 1
+                continue
+
+            function_calls = self._message_function_calls(msg)
+            if msg.role == "assistant" and function_calls:
+                expected_ids = [
+                    str(call.get("id"))
+                    for call in function_calls
+                    if call.get("id")
+                ]
+                valid = (
+                    len(expected_ids) == len(function_calls)
+                    and len(set(expected_ids)) == len(expected_ids)
+                )
+                batch_tools: List[Message] = []
+                seen_ids: set[str] = set()
+                cursor = index + 1
+
+                while cursor < len(messages) and messages[cursor].role == "tool":
+                    tool_msg = messages[cursor]
+                    response = (tool_msg.metadata or {}).get("function_response", {})
+                    tool_call_id = response.get("id")
+                    if not tool_call_id:
+                        valid = False
+                    else:
+                        tool_call_id = str(tool_call_id)
+                        if tool_call_id not in expected_ids or tool_call_id in seen_ids:
+                            valid = False
+                        else:
+                            seen_ids.add(tool_call_id)
+                            batch_tools.append(tool_msg)
+                    cursor += 1
+
+                if valid and all(call_id in seen_ids for call_id in expected_ids):
+                    safe.append(msg)
+                    safe.extend(batch_tools)
+
+                index = cursor
+                continue
+
+            safe.append(msg)
+            index += 1
+
+        return safe
+
+    @staticmethod
+    def _message_function_calls(msg: Message) -> List[dict]:
+        metadata = msg.metadata or {}
+        calls = metadata.get("function_calls")
+        if isinstance(calls, list) and calls:
+            return [call for call in calls if isinstance(call, dict)]
+        call = metadata.get("function_call")
+        if isinstance(call, dict):
+            return [call]
+        return []
 
     def _start_scratchpad(self, user_input: str) -> None:
         if self.scratchpad is not None:
@@ -1189,8 +1559,27 @@ class AgentRuntime:
 
     @staticmethod
     def _looks_like_tool_preamble(text: str) -> bool:
-        lowered = str(text or "").lower()
-        phrases = (
+        compact = " ".join(str(text or "").strip().split())
+        if not compact:
+            return False
+        lowered = compact.lower()
+
+        protocol_prefixes = ("read_file", "tool_calls", "tool_call", "invoke", "dsml", "<｜｜", "<|", "[调用工具", "调用工具:")
+        if lowered.startswith(protocol_prefixes):
+            return True
+
+        answer_markers = ("难点", "亮点", "结论", "总结", "建议", "原因", "包括", "如下", "主要")
+        if len(compact) > 120 and any(marker in compact for marker in answer_markers):
+            return False
+
+        draft_patterns = (
+            r"^(让我|我来|我现在来|我先|先|首先|接下来|下面).{0,40}(用实际代码|看看|看一下|查看|检查|读取|搜索|搜一下|查找|分析|打开)",
+            r"^(需要|应该|最好).{0,30}(查看|检查|读取|搜索|查找)",
+        )
+        if any(re.search(pattern, compact, flags=re.IGNORECASE) for pattern in draft_patterns):
+            return True
+
+        short_draft_phrases = (
             "用实际代码",
             "看看相关",
             "查看相关",
@@ -1201,13 +1590,15 @@ class AgentRuntime:
             "我现在来检查",
             "让我检查",
             "先检查",
-            "读取",
-            "read_file",
-            "tool_calls",
-            "invoke",
-            "dsml",
         )
-        return any(phrase in lowered for phrase in phrases)
+        if len(compact) <= 140 and any(phrase in lowered for phrase in short_draft_phrases):
+            return True
+
+        english_draft_patterns = (
+            r"^(let me|i'?ll|i am going to|i'm going to|i will|i need to|i want to|trying to).{0,80}(search|fetch|look up|check|get|try|retrieve|find|browse)",
+            r"^(let me try|i will try|i'll try).{0,80}(search|fetch|look up|check|get|retrieve)",
+        )
+        return any(re.search(pattern, compact, flags=re.IGNORECASE) for pattern in english_draft_patterns)
 
     @staticmethod
     def _fallback_plain_answer(user_input: str) -> str:

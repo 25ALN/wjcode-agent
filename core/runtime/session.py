@@ -40,6 +40,15 @@ def _now() -> float:
     return datetime.now().timestamp()
 
 
+def _system_prompt_with_current_date(prompt: str) -> str:
+    today = datetime.now().strftime("%Y-%m-%d")
+    return (
+        f"{prompt}\n\n"
+        f"【当前日期】{today}。涉及今天、明天、后天等相对日期时，以该日期为基准；"
+        "实时天气、新闻、价格等信息应使用联网搜索工具核验。"
+    )
+
+
 @dataclass
 class AgentSession:
     session_id: str
@@ -286,7 +295,7 @@ class AgentSessionManager:
             llm_client=self.llm_factory(),
             memory=memory,
             long_memory=long_memory,
-            system_prompt=self.system_prompt,
+            system_prompt=_system_prompt_with_current_date(self.system_prompt),
             tool_registry=registry,
             project_context=project_context,
             todo_list=todo,

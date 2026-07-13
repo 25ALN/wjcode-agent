@@ -45,12 +45,15 @@ class FileReadTool(BaseTool):
                 "description": (
                     "可选。结束行号（从1开始，包含该行）。"
                     "例如 end_line=20 表示读取到第20行。"
-                    "如果不指定则读取到文件末尾。"
+                    "如果不指定且 start_line 也不指定，则默认只读取文件开头窗口。"
                 ),
             },
         },
         "required": ["path"],
     }
+
+    DEFAULT_MAX_LINES = 160
+    DEFAULT_MAX_CHARS = 6000
 
     def __init__(self, workspace_root: Optional[str] = None):
         self.workspace_root = os.path.abspath(workspace_root or os.getcwd())
@@ -102,29 +105,65 @@ class FileReadTool(BaseTool):
             return f"[错误] 读取文件失败: {e}"
 
         total_lines = len(lines)
+        default_window = start_line is None and end_line is None
 
-        # 确定行号范围
-        if start_line is None:
+        if total_lines == 0:
+            logger.debug(f"FileReadTool: 读取空文件 {abs_path}")
+            return f"文件: {abs_path} (共 0 行，文件为空)"
+
+        # 未指定范围时只返回开头窗口，避免长文件撑爆模型上下文。
+        if default_window:
             start_line = 1
-        if end_line is None:
-            end_line = total_lines
+            end_line = min(total_lines, self.DEFAULT_MAX_LINES)
+        else:
+            if start_line is None:
+                start_line = 1
+            if end_line is None:
+                end_line = total_lines
 
         # 边界修正
         start_line = max(1, min(start_line, total_lines))
         end_line = max(start_line, min(end_line, total_lines))
 
         selected = lines[start_line - 1 : end_line]
-
-        # 拼接输出，带行号
-        result_parts = [f"文件: {abs_path} (共 {total_lines} 行，显示第 {start_line}-{end_line} 行)"]
-        result_parts.append("-" * 50)
+        rendered_lines = []
+        rendered_chars = 0
+        displayed_end = start_line - 1
+        truncated_by_chars = False
 
         for i, line in enumerate(selected, start=start_line):
-            result_parts.append(f"{i:4d} | {line.rstrip()}")
+            rendered = f"{i:4d} | {line.rstrip()}"
+            if default_window and rendered_chars + len(rendered) + 1 > self.DEFAULT_MAX_CHARS:
+                truncated_by_chars = True
+                if not rendered_lines:
+                    prefix = f"{i:4d} | "
+                    budget = max(0, self.DEFAULT_MAX_CHARS - len(prefix) - 20)
+                    rendered_lines.append(prefix + line.rstrip()[:budget] + "...(单行过长已截断)")
+                    displayed_end = i
+                break
+            rendered_lines.append(rendered)
+            rendered_chars += len(rendered) + 1
+            displayed_end = i
+
+        if displayed_end < start_line:
+            displayed_end = start_line
+
+        # 拼接输出，带行号
+        result_parts = [f"文件: {abs_path} (共 {total_lines} 行，显示第 {start_line}-{displayed_end} 行)"]
+        result_parts.append("-" * 50)
+        result_parts.extend(rendered_lines)
+
+        if default_window and (displayed_end < total_lines or truncated_by_chars):
+            result_parts.append("-" * 50)
+            result_parts.append(
+                "[提示] 默认读取已截断："
+                f"文件共 {total_lines} 行，本次显示第 {start_line}-{displayed_end} 行。"
+                "如需更多内容，请再次调用 read_file 并指定 start_line/end_line。"
+            )
 
         logger.debug(
             f"FileReadTool: 读取 {abs_path} "
-            f"(行 {start_line}-{end_line}/{total_lines}, {len(selected)} 行)"
+            f"(行 {start_line}-{displayed_end}/{total_lines}, {len(rendered_lines)} 行)"
         )
         return "\n".join(result_parts)
 

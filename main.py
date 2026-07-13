@@ -20,6 +20,7 @@ LLM 后端：DeepSeek API（deepseek-chat）
 import sys
 import os
 import logging
+from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(__file__))
 
@@ -138,6 +139,12 @@ def build_runtime(use_tools: bool = False, use_rag: bool = False) -> AgentRuntim
             rag_fn = lambda q: retriever.query_retrieve(q, top_k=3)
 
     prompt = RAG_SYSTEM_PROMPT if use_rag else SYSTEM_PROMPT
+    today = datetime.now().strftime("%Y-%m-%d")
+    prompt = (
+        f"{prompt}\n\n"
+        f"【当前日期】{today}。涉及今天、明天、后天等相对日期时，以该日期为基准；"
+        "实时天气、新闻、价格等信息应使用联网搜索工具核验。"
+    )
 
     # Stage 2 Step 2 — 加载 AGENT.md
     project_ctx = ProjectContext(os.path.join(project_root, "AGENT.md"))

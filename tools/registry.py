@@ -79,8 +79,12 @@ class ToolRegistry:
 
     # ── Function Calling 相关 ──────────────────
 
-    def get_function_declarations(self) -> List[Dict[str, Any]]:
-        return [tool.to_function_declaration() for tool in self._tools.values()]
+    def get_function_declarations(self, names: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+        tools = self._tools.values()
+        if names is not None:
+            wanted = {str(name) for name in names if name}
+            tools = [tool for tool in tools if tool.name in wanted]
+        return [tool.to_function_declaration() for tool in tools]
 
     def execute(self, name: str, **kwargs) -> str:
         """

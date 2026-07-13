@@ -58,6 +58,8 @@ promote.txt        — 项目规划文档
 - LLM 调用统一走 Client.generate() 接口（`{"text": str|None, "function_call": dict|None, "function_calls": list}`）
 - Tool 必须继承 BaseTool 并定义 name/description/parameters/risk_level
 - Tool-first：代码理解优先使用 `ls` / `grep` / `read_file`，小范围修改优先使用 `edit_file`
+- 只读项目/目录分析（如难点、亮点、架构、结构梳理）只能暴露 `ls` / `grep` / `read_file`，不得同时暴露 `write_file` / `edit_file` / `execute_code` / `web_search`；最多执行 3 个项目分析工具观察，预算用完后运行时必须关闭工具并强制输出最终答案
+- `read_file` 未指定 `start_line/end_line` 时只返回文件开头窗口并提示截断；需要更多内容必须显式指定行号范围，避免长文件一次性撑爆上下文
 - 工具 schema 必须按本轮意图暴露：普通概念问答不传工具，明确读/改/搜/运行项目内容时才进入工具循环；普通回答模式禁止输出 DSML/tool_calls 等伪工具协议文本
 - 普通回答模式的历史上下文必须去除上一轮原始 `assistant.tool_calls` 和 `tool` 协议消息，只保留用户可见对话；如果模型仍输出纯伪工具调用，只能针对通用 fallback 做一次严格自然语言重试
 - “模块怎么样了/状态如何/长期记忆存在哪里/打开旧会话从哪里恢复/请问...”这类状态或机制问答默认按普通回答处理；包含“打开/恢复”等词也不能仅凭关键词暴露工具；如果模型只输出“我先检查/我先看文件”但没有实际工具调用，应基于当前用户问题回退为直接自然语言答复
@@ -68,6 +70,11 @@ promote.txt        — 项目规划文档
 - 多步骤任务应通过 PlanningManager 和 `update_todo` 维护任务进度
 - `AgentRuntime.run_events()` 是 Web/API 和兼容流式输出的主路径；`stream_run()` 只能作为薄包装调用 `run_events()`，不能再维护第二套 prompt/tool/permission 逻辑
 - Function Calling 消息顺序必须满足协议：assistant 一旦带 `tool_calls`，下一次模型请求前必须为同一批所有 `tool_call_id` 补齐对应 tool 消息；权限恢复时必须继续完成当前 tool_calls batch，不能只补当前工具就立即请求模型
+- Native tool 上下文必须过滤 ShortMemory 截断留下的非法协议片段：孤立 `tool` 消息、不完整 `assistant.tool_calls` 批次不能发送给 LLM；完整 tool_calls + tool results 批次必须保留
+- Native tool 模式下如果模型输出 DSML/read_file/tool_calls 草稿但没有合法 function_call，应追加纠偏系统消息后继续工具循环，不应把草稿发给前端或兜底成普通问答
+- 工具草稿检测必须只匹配短前置语或协议文本，不能把“我读取了项目文件后...”这类正常最终回答误判为工具草稿；天气、新闻、价格等实时外部信息即使是“怎么样”问法也应暴露 `web_search`
+- Web/CLI runtime 系统提示必须注入当前日期；涉及今天、明天、后天等相对日期时必须以注入日期为准，必要时用联网搜索核验
+- 天气/实时信息这类外部查询应只暴露 `web_search`，不要同时把 `execute_code` 暴露给模型；搜索继续问答（如“查吧”）也应延续 `web_search` 语义
 - Web/API 层应使用 `server.service.AgentWebService` 暴露会话、SSE 消息流和权限恢复，不直接解析 CLI 文本输出
 - Web/API 默认 LLM 请求避免长时间悬挂：`DEEPSEEK_TIMEOUT` 默认 30 秒，`DEEPSEEK_RETRY_TIMES` 默认 1 次
 - Web UI 当前是 SSE 事件流 + 前端逐字呈现；真正 token 级工具流需要新增 runtime delta 事件，不能绕开 Function Calling/权限链路
