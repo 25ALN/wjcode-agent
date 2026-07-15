@@ -58,7 +58,7 @@ promote.txt        — 项目规划文档
 - LLM 调用统一走 Client.generate() 接口（`{"text": str|None, "function_call": dict|None, "function_calls": list}`）
 - Tool 必须继承 BaseTool 并定义 name/description/parameters/risk_level
 - Tool-first：代码理解优先使用 `ls` / `grep` / `read_file`，小范围修改优先使用 `edit_file`
-- 只读项目/目录分析（如难点、亮点、架构、结构梳理）只能暴露 `ls` / `grep` / `read_file`，不得同时暴露 `write_file` / `edit_file` / `execute_code` / `web_search`；最多执行 3 个项目分析工具观察，预算用完后运行时必须关闭工具并强制输出最终答案
+- 只读项目/目录分析（如难点、亮点、架构、结构梳理）只能暴露 `ls` / `grep` / `read_file`，不得同时暴露 `write_file` / `edit_file` / `execute_code` / `web_search`；此类任务进入 Exploration Mode，由 Runtime 维护 Exploration Checklist、Coverage Tracking、visited paths/files/symbols 和 Information Gain；核心模块未覆盖或最终回答缺少 Evidence 时必须继续探索，达到覆盖阈值、连续低信息增益或证据充分后再关闭工具并输出最终分析；若模型仍输出工具占位或失败，再使用本地确定性兜底答案
 - `read_file` 未指定 `start_line/end_line` 时只返回文件开头窗口并提示截断；需要更多内容必须显式指定行号范围，避免长文件一次性撑爆上下文
 - 工具 schema 必须按本轮意图暴露：普通概念问答不传工具，明确读/改/搜/运行项目内容时才进入工具循环；普通回答模式禁止输出 DSML/tool_calls 等伪工具协议文本
 - 普通回答模式的历史上下文必须去除上一轮原始 `assistant.tool_calls` 和 `tool` 协议消息，只保留用户可见对话；如果模型仍输出纯伪工具调用，只能针对通用 fallback 做一次严格自然语言重试
