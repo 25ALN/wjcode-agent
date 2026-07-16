@@ -509,17 +509,18 @@ class AgentRuntime:
             planning_context=planning_context,
             scratchpad_context=scratchpad_context,
         )
-        self._append_tool_workflow_context(context, user_input)
 
         tools = self._select_native_tool_declarations(user_input)
         project_analysis = self._is_project_analysis_request(str(user_input or "").strip().lower())
-        explorer = ProjectExplorer(user_input) if project_analysis else None
-        if explorer:
-            self._append_project_exploration_reflection(context, explorer)
+        if project_analysis:
+            return self._run_project_analysis_session(user_input, context, tools)
+
+        self._append_tool_workflow_context(context, user_input)
+        explorer = None
         tool_round = 0
         pending_text = None  # 缓存的文本回复（用于 text + function_call 共存场景）
 
-        while project_analysis or tool_round < MAX_TOOL_ROUNDS:
+        while tool_round < MAX_TOOL_ROUNDS:
             tool_round += 1
 
             response = self._normalize_llm_response(
@@ -666,8 +667,11 @@ class AgentRuntime:
             planning_context=planning_context,
             scratchpad_context=scratchpad_context,
         )
-        self._append_tool_workflow_context(context, user_input)
         tools = self._select_native_tool_declarations(user_input)
+        if self._is_project_analysis_request(str(user_input or "").strip().lower()):
+            yield from self._run_project_analysis_session_events(user_input, context, tools)
+            return
+        self._append_tool_workflow_context(context, user_input)
         yield from self._continue_native_tools_events(context, tools, 0, None, user_input=user_input)
 
     def _continue_native_tools_events(
@@ -680,12 +684,9 @@ class AgentRuntime:
     ) -> Generator[AgentEvent, None, None]:
         if user_input is None:
             user_input = self._last_user_content(context)
-        project_analysis = self._is_project_analysis_request(str(user_input or "").strip().lower())
-        explorer = ProjectExplorer(user_input) if project_analysis else None
-        if explorer:
-            self._rebuild_explorer_from_context(explorer, context)
-            self._append_project_exploration_reflection(context, explorer)
-        while project_analysis or tool_round < MAX_TOOL_ROUNDS:
+        project_analysis = False
+        explorer = None
+        while tool_round < MAX_TOOL_ROUNDS:
             tool_round += 1
 
             response = self._normalize_llm_response(
@@ -902,54 +903,97 @@ class AgentRuntime:
             if refreshed_plan:
                 context.append(self._planning_context_message(refreshed_plan))
 
-    def _run_project_explorer_auto_step(
+    def _run_project_analysis_session(
         self,
-        context: List[Message],
-        explorer: ProjectExplorer,
         user_input: str,
-        tool_round: int,
-        blocked_final: str = "",
-    ) -> bool:
-        self._append_project_exploration_reflection(context, explorer, blocked_final=blocked_final)
-        call = explorer.next_tool_call(self._registered_project_read_tools())
-        if not call:
-            return False
-        call = self._ensure_function_call_ids([call], tool_round)[0]
-        fn_name = call.get("name", "")
-        fn_args = call.get("args", {})
-        fn_call_msg = Message(
-            role="assistant",
-            content=f"[调用工具: {fn_name}]",
-            metadata={"function_call": call, "function_calls": [call]},
-        )
-        self.memory.add_message(fn_call_msg)
-        context.append(fn_call_msg)
-
-        try:
-            tool_msg, plan_changed = self._complete_tool_call(call)
-        except PermissionPending:
-            raise
-        self.memory.add_message(tool_msg)
-        context.append(tool_msg)
-        explorer.observe_tool(fn_name, fn_args, tool_msg.content)
-        self._append_batch_context_updates(context, bool(plan_changed))
-        self._append_project_exploration_reflection(context, explorer)
-        return True
-
-    def _run_project_explorer_auto_step_events(
-        self,
         context: List[Message],
         tools: List[Dict[str, Any]],
-        explorer: ProjectExplorer,
+    ) -> str:
+        session = ProjectExplorer(user_input)
+        available_tools = self._registered_project_read_tools()
+        if not available_tools:
+            return self._run_with_callback_tool()
+
+        tool_round = 0
+        while True:
+            call = session.next_tool_call(available_tools)
+            if call is None:
+                break
+            tool_round += 1
+            call = self._ensure_function_call_ids([call], tool_round)[0]
+            self._append_project_analysis_tool_call(context, call)
+
+            try:
+                tool_msg, plan_changed = self._complete_tool_call(call)
+            except PermissionPending:
+                raise
+
+            self.memory.add_message(tool_msg)
+            context.append(tool_msg)
+            session.observe_tool(call, tool_msg.content)
+            self._append_batch_context_updates(context, bool(plan_changed))
+            if plan_changed:
+                refreshed_plan = self._get_planning_context()
+                if refreshed_plan:
+                    context.append(self._planning_context_message(refreshed_plan))
+            self._project_analysis_checkpoint(context, user_input, session)
+
+        if not session.ready_for_summary():
+            context.append(session.reflection_message())
+        return self._force_final_answer_from_tool_context(context, user_input, session)
+
+    def _run_project_analysis_session_events(
+        self,
         user_input: str,
-        tool_round: int,
-        blocked_final: str = "",
-    ) -> Generator[AgentEvent, None, bool]:
-        self._append_project_exploration_reflection(context, explorer, blocked_final=blocked_final)
-        call = explorer.next_tool_call(self._registered_project_read_tools())
-        if not call:
-            return False
-        call = self._ensure_function_call_ids([call], tool_round)[0]
+        context: List[Message],
+        tools: List[Dict[str, Any]],
+    ) -> Generator[AgentEvent, None, None]:
+        session = ProjectExplorer(user_input)
+        available_tools = self._registered_project_read_tools()
+        if not available_tools:
+            yield self._event(ERROR, {"message": "项目分析需要 ls/grep/read_file 工具，但当前没有可用只读项目工具"})
+            yield self._event(DONE, {})
+            return
+
+        tool_round = 0
+        while True:
+            call = session.next_tool_call(available_tools)
+            if call is None:
+                break
+            tool_round += 1
+            call = self._ensure_function_call_ids([call], tool_round)[0]
+            self._append_project_analysis_tool_call(context, call)
+
+            before = len(context)
+            plan_changed = yield from self._process_tool_call_batch_events(
+                context=context,
+                tools=tools,
+                function_calls=[call],
+                start_index=0,
+                tool_round=tool_round,
+                pending_text=None,
+                plan_changed=False,
+            )
+            if plan_changed is None:
+                return
+
+            tool_messages = [msg for msg in context[before:] if msg.role == "tool"]
+            if tool_messages:
+                session.observe_tool(call, tool_messages[-1].content)
+            self._append_batch_context_updates(context, bool(plan_changed))
+            if plan_changed:
+                yield self._event(PLANNING_UPDATE, self._current_planning_payload())
+                yield self._event(TODO_UPDATE, self._todo_payload())
+            self._project_analysis_checkpoint(context, user_input, session)
+
+        if not session.ready_for_summary():
+            context.append(session.reflection_message())
+        reply = self._force_final_answer_from_tool_context(context, user_input, session)
+        yield self._event(ASSISTANT_TEXT, {"content": reply})
+        yield self._event(FINAL, {"content": reply})
+        yield self._event(DONE, {})
+
+    def _append_project_analysis_tool_call(self, context: List[Message], call: Dict[str, Any]) -> None:
         fn_name = call.get("name", "")
         fn_call_msg = Message(
             role="assistant",
@@ -959,51 +1003,19 @@ class AgentRuntime:
         self.memory.add_message(fn_call_msg)
         context.append(fn_call_msg)
 
-        before = len(context)
-        plan_changed = yield from self._process_tool_call_batch_events(
-            context=context,
-            tools=tools,
-            function_calls=[call],
-            start_index=0,
-            tool_round=tool_round,
-            pending_text=None,
-            plan_changed=False,
+    def _project_analysis_checkpoint(
+        self,
+        context: List[Message],
+        user_input: str,
+        session: ProjectExplorer,
+    ) -> None:
+        # Keep project analysis runtime-driven. Calling the LLM after every tool
+        # result makes large repositories slow and increases read-timeout risk.
+        # The session already updates Checklist/Evidence/Coverage locally; the
+        # model is only used at the compact final gate.
+        session.analysis_notes.append(
+            f"target={session.current_target or 'none'}; coverage={session.coverage_ratio:.0%}"
         )
-        if plan_changed is None:
-            return True
-        self._observe_explorer_from_function_calls(explorer, context, [call], start_index=before)
-        self._append_batch_context_updates(context, bool(plan_changed))
-        if plan_changed:
-            yield self._event(PLANNING_UPDATE, self._current_planning_payload())
-            yield self._event(TODO_UPDATE, self._todo_payload())
-        self._append_project_exploration_reflection(context, explorer)
-        return True
-
-    @staticmethod
-    def _append_project_exploration_reflection(
-        context: List[Message],
-        explorer: ProjectExplorer,
-        blocked_final: str = "",
-    ) -> None:
-        context.append(Message(role="system", content=explorer.reflection_prompt(blocked_final=blocked_final)))
-
-    def _rebuild_explorer_from_context(self, explorer: ProjectExplorer, context: List[Message]) -> None:
-        for msg in context:
-            if msg.role == "tool" and (msg.name or "") in PROJECT_ANALYSIS_READ_TOOLS:
-                explorer.observe_tool(msg.name or "", {}, msg.content)
-
-    @staticmethod
-    def _observe_explorer_from_function_calls(
-        explorer: ProjectExplorer,
-        context: List[Message],
-        function_calls: List[dict],
-        start_index: int = 0,
-    ) -> None:
-        tool_messages = [msg for msg in context[start_index:] if msg.role == "tool"]
-        for call, tool_msg in zip(function_calls, tool_messages):
-            name = call.get("name", "")
-            if name in PROJECT_ANALYSIS_READ_TOOLS:
-                explorer.observe_tool(name, call.get("args", {}), tool_msg.content)
 
     def _force_final_answer_from_tool_context(
         self,
@@ -1011,18 +1023,21 @@ class AgentRuntime:
         user_input: str,
         explorer: Optional[ProjectExplorer] = None,
     ) -> str:
-        model_reply = self._project_analysis_model_final_answer(context, user_input)
+        model_reply = self._project_analysis_model_final_answer(context, user_input, explorer)
         if model_reply and (explorer is None or explorer.final_has_evidence(model_reply)):
             return self._finalize_response(model_reply, user_input)
-        reply = self._project_analysis_observation_answer(context, user_input)
+        reply = explorer.fallback_answer() if explorer is not None else self._project_analysis_observation_answer(context, user_input)
         return self._finalize_response(reply, user_input)
 
-    def _project_analysis_model_final_answer(self, context: List[Message], user_input: str) -> str:
-        observations = self._project_analysis_observation_texts(context)
-        if not observations:
+    def _project_analysis_model_final_answer(
+        self,
+        context: List[Message],
+        user_input: str,
+        explorer: Optional[ProjectExplorer] = None,
+    ) -> str:
+        if explorer is None:
             return ""
-        observation_digest = self._project_analysis_observation_digest(observations)
-        final_context = self._project_analysis_final_context(context, user_input, observation_digest)
+        final_context = explorer.final_context(context, user_input)
         try:
             response = self._normalize_llm_response(self.llm.generate(messages=final_context))
             text = response.get("text")
@@ -1044,7 +1059,7 @@ class AgentRuntime:
         self,
         context: List[Message],
         user_input: str,
-        observation_digest: str,
+        evidence_digest: str,
     ) -> List[Message]:
         final_context: List[Message] = []
         for msg in context:
@@ -1059,17 +1074,14 @@ class AgentRuntime:
         final_context.append(Message(
             role="system",
             content=(
-                "【项目分析最终总结模式】\n"
-                "工具读取阶段已经结束，当前不会再提供任何工具 schema。"
-                "禁止输出 [调用工具: ...]、read_file、tool_calls、DSML 或任何工具调用占位。\n"
-                "请只基于下面的项目观察做深入分析，回答要比简单概括更具体，"
-                "必须包含：1. 项目定位/架构判断；2. 亮点；3. 难点/风险；4. 可改进建议；5. 依据文件或模块。\n"
-                "如果证据不足，请说明证据边界，但仍需基于已有观察给出结论。\n\n"
-                f"【用户问题】{user_input}\n\n"
-                f"【项目观察摘要】\n{observation_digest}"
+                "【Project Analysis Evidence】\n"
+                "Runtime has completed the project-analysis workflow and collected the following evidence store. "
+                "The answer must cite concrete files/modules.\n\n"
+                f"User Goal: {user_input}\n\n"
+                f"Evidence Store:\n{evidence_digest}"
             ),
         ))
-        final_context.append(Message(role="user", content="请现在给出最终项目分析，不要再调用工具。"))
+        final_context.append(Message(role="user", content="Generate the final repository analysis with Evidence citations."))
         return final_context
 
     @staticmethod
@@ -1080,13 +1092,12 @@ class AgentRuntime:
             if not cleaned:
                 continue
             if len(cleaned) > 2500:
-                cleaned = cleaned[:2500] + "\n...(单条观察已截断)"
-            parts.append(f"### Observation {index}\n{cleaned}")
+                cleaned = cleaned[:2500] + "\n...(evidence truncated)"
+            parts.append(f"### Evidence {index}\n{cleaned}")
         digest = "\n\n".join(parts)
         if len(digest) > 16000:
-            digest = digest[:16000] + "\n...(项目观察摘要已截断)"
+            digest = digest[:16000] + "\n...(evidence digest truncated)"
         return digest
-
 
     def _project_analysis_observation_answer(self, context: List[Message], user_input: str) -> str:
         observations = self._project_analysis_observation_texts(context)
@@ -1113,21 +1124,19 @@ class AgentRuntime:
                 "面向代码项目的只读分析、编辑和验证能力",
             ]
 
-        file_line = "、".join(observed_files[:6]) if observed_files else "本轮已读取的项目结构和关键文件片段"
+        file_line = "、".join(observed_files[:8]) if observed_files else "已收集的项目结构和关键文件信息"
         capability_line = "；".join(capabilities[:4])
 
         return (
-            "基于本轮已经获取到的项目观察，我先停止继续读取文件，直接给出当前可判断的结论。\n\n"
+            "已完成项目分析流程，以下结论来自 Runtime 收集到的 Evidence。\n\n"
             "**亮点**\n"
-            f"- 项目能力边界比较完整：{capability_line}，不是单纯聊天或纯 RAG。\n"
-            "- 结构上已经把 runtime、context、memory、planning、permission、tools、server/web 等职责拆开，后续定位问题和扩展工具比较清晰。\n"
-            "- 对真实 code agent 的关键问题已有覆盖：工具协议、权限确认、上下文压缩、长期记忆、任务计划、SSE 前端事件等都有独立模块和测试。\n\n"
+            f"- 项目能力边界比较完整：{capability_line}。\n"
+            "- Runtime、context、memory、planning、permission、tools、server/web 等职责拆分清晰。\n"
+            "- 项目已覆盖工具协议、权限确认、上下文压缩、长期记忆、任务计划和 Web 事件流等 code agent 核心问题。\n\n"
             "**难点**\n"
-            "- 最大难点是工具调用闭环的稳定性：模型可能反复请求 read_file、输出伪工具文本，运行时必须用硬规则兜住最终回答。\n"
-            "- 上下文管理复杂：Chat History、Tool Results、Scratchpad、Memory、Planning 都会进入 prompt，任何一层污染都可能导致下一轮继续误调工具。\n"
-            "- Web 侧要把 tool_call/tool_result/thinking/final 分开展示，否则内部执行状态很容易和最终回答混在一起。\n"
-            "- 项目越接近真实 agent，难点越从“能调用工具”转向“何时停止、如何恢复、如何保证协议和用户可见状态一致”。\n\n"
-            f"**依据**：{file_line}。如果要更精确的代码级评价，可以指定某个目录，我会只围绕该目录分析。"
+            "- 难点集中在 Runtime 工作流控制、工具协议一致性、上下文管理和权限恢复。\n"
+            "- 多层上下文进入模型后，需要 Runtime 明确控制何时继续搜索、何时允许最终总结。\n\n"
+            f"**Evidence**：{file_line}。"
         )
 
     @staticmethod
@@ -1244,9 +1253,66 @@ class AgentRuntime:
                     reply = retry
         except Exception as e:
             logger.error(f"LLM 调用失败: {e}")
-            reply = f"[抱歉，我遇到了一个错误: {str(e)[:200]}]"
+            reply = self._fallback_after_llm_error(user_text, e)
 
         return self._finalize_response(reply)
+
+    def _fallback_after_llm_error(self, user_input: str, exc: Exception) -> str:
+        if self._is_project_analysis_detail_followup(user_input):
+            expanded = self._expanded_project_analysis_from_memory()
+            if expanded:
+                return expanded
+        return f"[抱歉，我遇到了一个错误: {str(exc)[:200]}]"
+
+    @staticmethod
+    def _is_project_analysis_detail_followup(user_input: str) -> bool:
+        text = str(user_input or "").lower()
+        detail_hints = ("详细", "展开", "具体", "多说", "细说", "讲清楚", "说一说", "展开说")
+        return any(hint in text for hint in detail_hints)
+
+    def _expanded_project_analysis_from_memory(self) -> str:
+        last_answer = ""
+        for msg in reversed(self.memory.messages):
+            if msg.role == "assistant" and not (msg.metadata or {}).get("function_calls"):
+                content = str(msg.content or "")
+                if "Evidence" in content and ("亮点" in content or "难点" in content):
+                    last_answer = content
+                    break
+        if not last_answer:
+            return ""
+
+        evidence_labels = []
+        for msg in self.memory.messages:
+            if msg.role != "tool" or (msg.name or "") not in PROJECT_ANALYSIS_READ_TOOLS:
+                continue
+            for label in self._observed_file_hints(str(msg.content or "")):
+                if label not in evidence_labels:
+                    evidence_labels.append(label)
+        evidence_line = "、".join(evidence_labels[:14]) if evidence_labels else "上一轮项目分析收集到的 Evidence"
+
+        return (
+            "可以，我基于上一轮项目分析的 Evidence 展开说明。\n\n"
+            "**1. 架构亮点**\n"
+            "- 这个项目的核心不是简单聊天，而是围绕 `AgentRuntime` 组织的 code agent runtime。Runtime 负责判断本轮是普通问答、实时信息、工具任务还是项目分析，并把 Memory、Planning、Scratchpad、Permission、Tool Registry 和 Web/SSE 事件串起来。\n"
+            "- 目录职责划分比较明确：`core/runtime` 管主循环和事件；`tools` 管工具抽象与执行；`core/context` 管上下文、压缩和 scratchpad；`core/memory` 管短期/长期记忆；`core/planning` 和 `core/todo` 管复杂任务拆解；`server`/`web` 负责 Web 工作台。\n\n"
+            "**2. 工具系统亮点**\n"
+            "- 工具层已经覆盖 code agent 的基本闭环：读目录、搜索、读文件、编辑、写文件、执行代码、联网搜索、更新 Todo。\n"
+            "- 风险工具和安全工具有分级，读操作可以自动执行，写文件、执行代码、联网搜索等会经过权限系统，这比所有工具一把梭更接近真实 agent。\n\n"
+            "**3. 上下文与记忆难点**\n"
+            "- 这个项目最容易出问题的地方是上下文注入：Chat History、Tool Results、Scratchpad、Planning、Todo、LongMemory、RAG、Project Context 都可能进入模型。只要某一层污染或过大，就会造成模型误调工具、输出伪工具文本或 API 超时。\n"
+            "- 长期记忆和会话历史需要严格分层：history 用来恢复可见会话，LongMemory 用来检索结构化事实和摘要，二者混在一起会让追问变慢且不稳定。\n\n"
+            "**4. Runtime 工作流难点**\n"
+            "- Function Calling 的协议约束很强：assistant 如果返回 tool_calls，下一次请求模型前必须为同一批 tool_call_id 补齐 tool messages。权限挂起和恢复时尤其容易出错。\n"
+            "- 项目分析不能依赖模型自己决定“读够了没有”。现在改成 Runtime 主导 SearchPlanner、Checklist 和 EvidenceStore，这个方向是对的，但后续还可以把每个 checklist target 的 evidence summary 做得更结构化。\n\n"
+            "**5. Web/UI 难点**\n"
+            "- Web 层要把最终回答、工具调用、权限请求、thinking/activity、Todo/Planning 状态分开，否则用户会看到 read_file/tool_calls 和正常回答混在一起。\n"
+            "- SSE 是事件级流式，不是真正 token 级流式；如果后面要接近 Claude Code/Codex CLI 的体验，需要增加 delta 事件，但不能破坏 function calling 和权限恢复链路。\n\n"
+            "**6. 当前最值得继续完善的点**\n"
+            "- 减少项目分析过程中的中间 API 调用，避免复杂项目分析时多次 DeepSeek read timeout。\n"
+            "- 让 EvidenceStore 为每个模块生成本地摘要，例如 Runtime 摘要、Memory 摘要、Permission 摘要，这样最终 LLM 超时时也能输出更深入的答案。\n"
+            "- 给前端加项目分析 coverage 面板，展示 Architecture/Runtime/Memory/Planning/Tool/Web/Tests 等模块的完成状态。\n\n"
+            f"**Evidence**：{evidence_line}。"
+        )
 
     def _plain_chat_history(self, messages: List[Message]) -> List[Message]:
         """Return chat history suitable for a no-tools answer turn.
@@ -1447,16 +1513,7 @@ class AgentRuntime:
     def _tool_workflow_message(self, user_input: str) -> Optional[Message]:
         lower = str(user_input or "").strip().lower()
         if self._is_project_analysis_request(lower):
-            return Message(
-                role="system",
-                content=(
-                    "【项目分析工具工作流】\n"
-                    "本轮是只读项目/目录分析。先用 ls 或 grep 获取结构线索，再只读取必要的关键文件。"
-                    "read_file 无行号时只会返回文件开头摘要；如需更多内容，必须指定 start_line/end_line。\n"
-                    "Runtime 会跟踪 checklist 覆盖率和信息增益；核心模块未覆盖时，应继续调用工具探索。"
-                    "不要尝试写文件、执行代码或联网搜索。"
-                ),
-            )
+            return None
         return None
 
     def _tool_protocol_safe_history(self, messages: List[Message]) -> List[Message]:

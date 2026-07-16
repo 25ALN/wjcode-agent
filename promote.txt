@@ -43,7 +43,7 @@ Thought -> Action(tool call) -> Observation(tool result) -> ... -> Answer
 - `run_events()` 是 Web/API 和兼容流式输出的 canonical 路径，`stream_run()` 只是薄包装，不再维护第二套执行逻辑。
 - 普通问答追问会使用去工具协议化的历史上下文，避免上一轮 read_file/tool_calls 消息污染下一轮自然语言回答；“模块怎么样了/状态如何”这类状态问答默认不暴露工具；纯伪工具输出或纯检查前置语会针对通用 fallback 做一次严格普通回答重试/回退。
 - 权限恢复会继续完成当前 assistant 返回的整批 `tool_calls`，确保每个 `tool_call_id` 都有对应 tool message 后才再次请求 DeepSeek，避免 HTTP 400 的 insufficient tool messages 错误。
-- 项目/目录只读分析会进入 Exploration Mode：只暴露 `ls` / `grep` / `read_file`，Runtime 维护 Exploration Checklist、Coverage Tracking、visited paths/files/symbols 和 Information Gain；每轮 Observation 后追加 Reflection，核心模块未覆盖或最终回答缺少 Evidence 时继续探索，达到覆盖阈值、连续低信息增益或证据充分后再关闭工具 schema 做最终总结。
+- 项目/目录只读分析会进入 Runtime 主导的 ProjectAnalysisSession：只暴露 `ls` / `grep` / `read_file`，但不会先请求 LLM；Runtime 先初始化 Analysis Goal、Checklist、EvidenceStore、CoverageTracker 和 SearchPlanner，然后按 Architecture、CLI、Prompt、Runtime、Planning、Memory、Context、Permission、Tool、Server/Web、RAG、Tests、Deployment 多阶段收集证据；每次工具结果先更新 Checklist/Evidence，再把 Analysis State 提供给 LLM 做阶段判断；Checklist 未满足时拒绝 Final，最终总结只在 Runtime final gate 通过后生成。
 
 当前限制：
 
@@ -108,7 +108,7 @@ Thought -> Action(tool call) -> Observation(tool result) -> ... -> Answer
 - `edit_file`
 - `update_todo`
 
-说明：RAG 模块可以保留用于文档类知识检索；代码理解应优先走 `ls/grep/read_file`，小范围修改优先走 `edit_file`，需要全量创建或覆盖文件时再使用 `write_file`。文件/项目工具的相对路径统一按 workspace root 解析，而不是进程当前目录。只读项目分析会限制为 `ls/grep/read_file`，并由 Runtime 的 Exploration State 判断何时停止：覆盖关键模块、信息增益趋低或证据已充分后才允许最终回答；`read_file` 默认只显示文件开头窗口，模型需要后续内容时必须显式指定 `start_line/end_line`。
+说明：RAG 模块可以保留用于文档类知识检索；代码理解应优先走 `ls/grep/read_file`，小范围修改优先走 `edit_file`，需要全量创建或覆盖文件时再使用 `write_file`。文件/项目工具的相对路径统一按 workspace root 解析，而不是进程当前目录。只读项目分析限制为 `ls/grep/read_file`，并由 `ProjectAnalysisSession` 的 Checklist、EvidenceStore 和 SearchPlanner 判断何时进入最终总结；`read_file` 默认只显示文件开头窗口，模型需要后续内容时必须显式指定 `start_line/end_line`。
 
 ### 5. Context Management（上下文管理）- 已完成并持续增强
 
@@ -394,4 +394,4 @@ coder-agent/
 - `./venv/bin/python -m pytest`：85 项通过，2 个 warning（`test_registry` 返回 ToolRegistry 对象；FastAPI TestClient 的 StarletteDeprecationWarning）。
 - 启动 `./venv/bin/python -m server.main --host 127.0.0.1 --port 8000` 后，`GET /`、`GET /app.js`、`GET /styles.css`、`GET /health` 均返回 200。
 
-结论：第一阶段、第二阶段和第三阶段静态前端均已完成。项目现在具备 Agent Loop、ReAct + Planning 混合执行、按意图暴露工具 schema、项目/目录分析 Exploration Mode、Coverage Tracking、Information Gain、Reflection Loop、Evidence 约束、`read_file` 默认窗口截断、普通追问去工具协议化历史、状态/机制类问答自然语言回退、长期记忆/历史恢复位置问答不误触发工具、每轮 session history 持久化、空历史过滤、历史会话侧边栏恢复、英文关键词词边界判定、解释类问题不误触发 Planning、`run_events()` 统一事件路径、工作区边界权限确认、权限恢复补齐同批 tool_calls、ShortMemory 截断后的 tool protocol 安全过滤、native tool 伪工具草稿纠偏重试、工具最终回答防误清理、天气/实时信息仅暴露 web_search、当前日期注入、伪工具协议清理、工具调用、DuckDuckGo 免费联网搜索、权限确认、项目上下文、结构化长期记忆检索、Todo 追踪/持久化、代码搜索/编辑工具、Scratchpad 显式草稿区、上下文压缩、多会话 Web API、SSE 事件流、权限恢复、Markdown 回复渲染、activity strip、thinking 状态和三栏静态 Web UI；剩余主要是真实浏览器联调、token 级 delta 事件、diff 专用视图和更细粒度的工具结果折叠。
+结论：第一阶段、第二阶段和第三阶段静态前端均已完成。项目现在具备 Agent Loop、ReAct + Planning 混合执行、按意图暴露工具 schema、Runtime 主导的 ProjectAnalysisSession、Analysis Checklist、SearchPlanner、EvidenceStore、CoverageTracker、Final Gate Evidence 约束、`read_file` 默认窗口截断、普通追问去工具协议化历史、状态/机制类问答自然语言回退、长期记忆/历史恢复位置问答不误触发工具、每轮 session history 持久化、空历史过滤、历史会话侧边栏恢复、英文关键词词边界判定、解释类问题不误触发 Planning、`run_events()` 统一事件路径、工作区边界权限确认、权限恢复补齐同批 tool_calls、ShortMemory 截断后的 tool protocol 安全过滤、native tool 伪工具草稿纠偏重试、工具最终回答防误清理、天气/实时信息仅暴露 web_search、当前日期注入、伪工具协议清理、工具调用、DuckDuckGo 免费联网搜索、权限确认、项目上下文、结构化长期记忆检索、Todo 追踪/持久化、代码搜索/编辑工具、Scratchpad 显式草稿区、上下文压缩、多会话 Web API、SSE 事件流、权限恢复、Markdown 回复渲染、activity strip、thinking 状态和三栏静态 Web UI；剩余主要是真实浏览器联调、token 级 delta 事件、diff 专用视图和更细粒度的工具结果折叠。
