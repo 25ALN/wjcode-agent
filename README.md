@@ -50,7 +50,6 @@ DEEPSEEK_TIMEOUT=30
 DEEPSEEK_RETRY_TIMES=1
 ```
 
-`.env` 已在 `.gitignore` 中忽略，不要提交。
 
 ## 启动方式
 
@@ -210,7 +209,7 @@ Planning / Todo State
 FastAPI 提供的主要接口：
 
 ```text
-GET  /                         # Web UI
+GET  /Web UI
 GET  /health
 POST /sessions
 GET  /sessions
@@ -236,36 +235,3 @@ venv/bin/python -m pytest
 ```bash
 node --check web/app.js
 ```
-
-本地测试文件 `test_*.py` 已在 `.gitignore` 中忽略，便于你本地保留验证用例而不上传。
-
-## 提交前清理
-
-建议提交前保留源码、文档和 `.gitignore`，清理本地生成物：
-
-```bash
-find . -path './venv' -prune -o -name '__pycache__' -type d -print
-find . -path './venv' -prune -o -name '.pytest_cache' -type d -print
-```
-
-已忽略且不应提交的常见文件：
-
-```text
-venv/
-__pycache__/
-.pytest_cache/
-.env
-.agent_sessions/
-.agent_todo.json
-memory_long.json
-test_*.py
-```
-
-## 当前状态
-
-项目核心功能已完成，当前主要剩余增强方向是：
-
-- 真正 token 级别的 delta 输出，而不是当前块级 SSE + 前端逐字呈现。
-- 更细粒度的 diff 视图和工具结果折叠。
-- 更丰富的 Planning 步骤状态。
-- 更完善的真实浏览器长任务联调体验。
