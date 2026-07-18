@@ -20,12 +20,29 @@ def main() -> int:
         print("Install them with: pip install fastapi uvicorn")
         return 1
 
-    uvicorn.run(
-        "server.app:app",
-        host=args.host,
-        port=args.port,
-        reload=args.reload,
-    )
+    if args.reload:
+        uvicorn.run(
+            "server.app:app",
+            host=args.host,
+            port=args.port,
+            reload=True,
+        )
+        return 0
+
+    from server.app import app
+    from server.service import format_token_usage_summary
+
+    try:
+        uvicorn.run(
+            app,
+            host=args.host,
+            port=args.port,
+            reload=False,
+        )
+    finally:
+        service = getattr(getattr(app, "state", None), "agent_service", None)
+        if service is not None and hasattr(service, "get_token_usage_summary"):
+            print(format_token_usage_summary(service.get_token_usage_summary()))
     return 0
 
 

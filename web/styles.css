@@ -253,6 +253,38 @@ h1, h2, h3, p { margin: 0; }
   padding-right: 2px;
 }
 
+.session-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 30px;
+  gap: 6px;
+  align-items: stretch;
+}
+
+.session-delete-button {
+  width: 30px;
+  min-height: 50px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted);
+  display: grid;
+  place-items: center;
+  font-size: 18px;
+  font-weight: 850;
+  line-height: 1;
+}
+.session-row:hover .session-delete-button,
+.session-row.active .session-delete-button {
+  border-color: #efb4ae;
+  background: rgba(255, 243, 241, 0.74);
+  color: var(--danger);
+}
+.session-delete-button:hover {
+  border-color: var(--danger);
+  background: #ffe7e3;
+  color: var(--danger);
+}
+
 .session-button {
   width: 100%;
   min-height: 50px;

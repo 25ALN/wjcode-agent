@@ -181,10 +181,10 @@ def create_app(service: Optional[AgentWebService] = None):
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.delete("/sessions/{session_id}")
-    def close_session(session_id: str):
+    def delete_session(session_id: str):
         try:
-            svc().close_session(session_id)
-            return {"ok": True}
+            svc().delete_session(session_id)
+            return {"ok": True, "deleted": True}
         except SessionNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 

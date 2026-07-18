@@ -118,6 +118,9 @@ function updateControls() {
   el.newSessionButton.disabled = state.busy || state.resolvingPermission;
   el.refreshButton.disabled = state.busy || state.resolvingPermission;
   el.deleteSessionButton.disabled = !hasSession || state.busy || state.resolvingPermission;
+  for (const button of el.sessionList.querySelectorAll(".session-delete-button")) {
+    button.disabled = state.busy || state.resolvingPermission;
+  }
   el.allowPermissionButton.disabled = !canResolve;
   el.denyPermissionButton.disabled = !canResolve;
   el.permissionBanner.classList.toggle("is-resolving", state.resolvingPermission);
@@ -525,6 +528,9 @@ function renderSessions() {
   }
 
   for (const session of state.sessions) {
+    const row = document.createElement("div");
+    row.className = `session-row${session.session_id === state.sessionId ? " active" : ""}`;
+
     const button = document.createElement("button");
     button.type = "button";
     button.className = `session-button${session.session_id === state.sessionId ? " active" : ""}`;
@@ -539,7 +545,23 @@ function renderSessions() {
       <span class="session-preview">${escapeText(preview)}</span>
     `;
     button.addEventListener("click", () => selectSession(session.session_id));
-    el.sessionList.appendChild(button);
+
+    const deleteButton = document.createElement("button");
+    deleteButton.type = "button";
+    deleteButton.className = "session-delete-button";
+    deleteButton.title = "删除此会话";
+    deleteButton.setAttribute("aria-label", `删除会话 ${title}`);
+    deleteButton.textContent = "×";
+    deleteButton.disabled = state.busy || state.resolvingPermission;
+    deleteButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      deleteSession(session.session_id);
+    });
+
+    row.appendChild(button);
+    row.appendChild(deleteButton);
+    el.sessionList.appendChild(row);
   }
 }
 
@@ -775,26 +797,35 @@ async function selectSession(sessionId, force = false) {
   }
 }
 
-async function deleteSession() {
-  if (!state.sessionId) return;
-  const sessionId = state.sessionId;
+async function deleteSession(sessionId = state.sessionId) {
+  if (!sessionId) return;
+  const target = state.sessions.find((session) => session.session_id === sessionId);
+  const title = target?.title || `Session ${shortId(sessionId)}`;
+  if (!window.confirm(`删除会话“${title}”？此操作会移除本地历史记录。`)) return;
+
+  const deletingCurrent = sessionId === state.sessionId;
   setBusy(true);
   try {
     await request(`/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" });
-    state.sessionId = null;
-    localStorage.removeItem(SESSION_KEY);
     state.sessions = state.sessions.filter((session) => session.session_id !== sessionId);
-    state.tools = [];
-    clearChat();
-    el.sessionTitle.textContent = "未选择会话";
-    el.runtimeSubtitle.textContent = "等待连接";
-    renderPlanning(null);
-    renderTodo(null, 0);
-    renderScratchpad(null);
-    renderPermission(null);
-    renderTools();
-    renderSessions();
-    if (state.sessions.length) await selectSession(state.sessions[0].session_id);
+
+    if (deletingCurrent) {
+      state.sessionId = null;
+      localStorage.removeItem(SESSION_KEY);
+      state.tools = [];
+      clearChat();
+      el.sessionTitle.textContent = "未选择会话";
+      el.runtimeSubtitle.textContent = "等待连接";
+      renderPlanning(null);
+      renderTodo(null, 0);
+      renderScratchpad(null);
+      renderPermission(null);
+      renderTools();
+      renderSessions();
+      if (state.sessions.length) await selectSession(state.sessions[0].session_id);
+    } else {
+      renderSessions();
+    }
   } catch (error) {
     addMessage("error", "错误", error.message);
   } finally {

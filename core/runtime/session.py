@@ -34,6 +34,15 @@ DEFAULT_SYSTEM_PROMPT = (
 )
 
 HISTORY_FILENAME = "history.json"
+TOKEN_USAGE_KEYS = (
+    "requests",
+    "prompt_tokens",
+    "completion_tokens",
+    "total_tokens",
+    "estimated_prompt_tokens",
+    "estimated_completion_tokens",
+    "estimated_total_tokens",
+)
 
 
 def _now() -> float:
@@ -221,6 +230,7 @@ class AgentSessionManager:
         self.enable_permissions = enable_permissions
         self.memory_embedder = memory_embedder
         self._sessions: Dict[str, AgentSession] = {}
+        self._archived_api_usage = self._empty_api_usage()
 
     def create_session(self, session_id: Optional[str] = None) -> AgentSession:
         sid = session_id or uuid4().hex
@@ -241,12 +251,42 @@ class AgentSessionManager:
         return session
 
     def close_session(self, session_id: str) -> bool:
-        existed = self._sessions.pop(session_id, None) is not None
+        return self.delete_session(session_id)
+
+    def delete_session(self, session_id: str) -> bool:
+        session = self._sessions.pop(session_id, None)
+        existed = session is not None
+        if session is not None:
+            self._merge_api_usage(
+                self._archived_api_usage,
+                self._runtime_token_usage(session).get("api") or {},
+            )
         session_dir = self._session_dir(session_id)
         if os.path.isdir(session_dir):
             shutil.rmtree(session_dir, ignore_errors=True)
             existed = True
         return existed
+
+    def get_token_usage_summary(self) -> dict:
+        totals = dict(self._archived_api_usage)
+        sessions = []
+        for sid, session in self._sessions.items():
+            usage = self._runtime_token_usage(session)
+            api_usage = usage.get("api") or {}
+            self._merge_api_usage(totals, api_usage)
+            sessions.append({
+                "session_id": sid,
+                "title": session.title or session._derive_title(),
+                "memory_messages": usage.get("memory_messages") or 0,
+                "context_tokens": usage.get("context_tokens") or 0,
+                "api": dict(api_usage),
+            })
+        return {
+            "active_sessions": len(self._sessions),
+            "archived_api": dict(self._archived_api_usage),
+            "sessions": sessions,
+            "totals": totals,
+        }
 
     def list_sessions(self) -> list[dict]:
         snapshots: Dict[str, dict] = {
@@ -426,6 +466,30 @@ class AgentSessionManager:
             if item.get("timestamp"):
                 return float(item["timestamp"])
         return 0.0
+
+    @staticmethod
+    def _empty_api_usage() -> dict:
+        return {key: 0 for key in TOKEN_USAGE_KEYS}
+
+    @staticmethod
+    def _merge_api_usage(target: dict, source: dict) -> None:
+        for key in TOKEN_USAGE_KEYS:
+            target[key] = int(target.get(key) or 0) + int(source.get(key) or 0)
+
+    @staticmethod
+    def _runtime_token_usage(session: AgentSession) -> dict:
+        runtime = session.runtime
+        if hasattr(runtime, "get_token_usage_summary"):
+            try:
+                return runtime.get_token_usage_summary()
+            except Exception:
+                pass
+        memory = getattr(runtime, "memory", None)
+        return {
+            "memory_messages": len(getattr(memory, "messages", []) or []),
+            "context_tokens": memory.total_tokens() if hasattr(memory, "total_tokens") else 0,
+            "api": {},
+        }
 
     @staticmethod
     def _build_registry(todo, todo_store: TodoStore, workspace_root: str) -> ToolRegistry:

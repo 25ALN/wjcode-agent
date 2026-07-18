@@ -49,6 +49,34 @@ def iter_sse(events: Iterable[AgentEvent]) -> Iterator[str]:
         yield sse_encode(event)
 
 
+def format_token_usage_summary(summary: dict) -> str:
+    totals = summary.get("totals") or {}
+    active_sessions = int(summary.get("active_sessions") or 0)
+    requests = int(totals.get("requests") or 0)
+    actual_total = int(totals.get("total_tokens") or 0)
+    prompt_tokens = int(totals.get("prompt_tokens") or 0)
+    completion_tokens = int(totals.get("completion_tokens") or 0)
+    estimated_total = int(totals.get("estimated_total_tokens") or 0)
+    estimated_prompt = int(totals.get("estimated_prompt_tokens") or 0)
+    estimated_completion = int(totals.get("estimated_completion_tokens") or 0)
+
+    lines = ["📊 本次 Web 服务 Token 统计"]
+    if actual_total:
+        lines.append(
+            f"  API 实际消耗: {actual_total} tokens "
+            f"(prompt {prompt_tokens}, completion {completion_tokens}, requests {requests})"
+        )
+    elif estimated_total:
+        lines.append(
+            f"  API 估算消耗: ~{estimated_total} tokens "
+            f"(prompt ~{estimated_prompt}, completion ~{estimated_completion}, requests {requests})"
+        )
+    else:
+        lines.append("  API 消耗: 0 tokens（本次没有完成的模型请求）")
+    lines.append(f"  活跃会话: {active_sessions}")
+    return "\n".join(lines)
+
+
 class AgentWebService:
     """Thin service layer around AgentSessionManager.
 
@@ -66,6 +94,12 @@ class AgentWebService:
     def list_sessions(self) -> list[dict]:
         return self.session_manager.list_sessions()
 
+    def get_token_usage_summary(self) -> dict:
+        usage_fn = getattr(self.session_manager, "get_token_usage_summary", None)
+        if callable(usage_fn):
+            return usage_fn()
+        return {"active_sessions": 0, "archived_api": {}, "sessions": [], "totals": {}}
+
     def get_session(self, session_id: str) -> AgentSession:
         session = self.session_manager.get_session(session_id)
         if session is None:
@@ -76,7 +110,12 @@ class AgentWebService:
         return self.get_session(session_id).snapshot()
 
     def close_session(self, session_id: str) -> bool:
-        if not self.session_manager.close_session(session_id):
+        return self.delete_session(session_id)
+
+    def delete_session(self, session_id: str) -> bool:
+        delete_fn = getattr(self.session_manager, "delete_session", None)
+        deleted = delete_fn(session_id) if callable(delete_fn) else self.session_manager.close_session(session_id)
+        if not deleted:
             raise SessionNotFoundError(f"session not found: {session_id}")
         return True
 

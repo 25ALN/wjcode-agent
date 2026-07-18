@@ -41,6 +41,15 @@ class DeepSeekClient:
         self.temperature = temperature
         self.top_p = top_p
         self.max_output_tokens = max_output_tokens
+        self._usage = {
+            "requests": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "estimated_prompt_tokens": 0,
+            "estimated_completion_tokens": 0,
+            "estimated_total_tokens": 0,
+        }
 
     def generate(
         self,
@@ -54,8 +63,16 @@ class DeepSeekClient:
             f"DeepSeek 请求: {len(messages)} 条消息, "
             f"tools={bool(tools)}, model={self.model_name}"
         )
+        estimated_prompt_tokens = self._estimate_payload_tokens(payload)
         response = self._call_with_retry(payload)
-        return self._parse_response(response)
+        parsed = self._parse_response(response)
+        estimated_completion_tokens = Message.estimate_tokens(parsed.get("text") or "")
+        self._record_usage(
+            response,
+            estimated_prompt_tokens=estimated_prompt_tokens,
+            estimated_completion_tokens=estimated_completion_tokens,
+        )
+        return parsed
 
     def stream_generate(
         self,
@@ -75,6 +92,14 @@ class DeepSeekClient:
 
     def count_tokens(self, messages: List[Message]) -> int:
         return sum(msg.token_count() for msg in messages)
+
+    def get_usage_summary(self) -> dict:
+        """Return accumulated API token usage for the current client instance."""
+        return dict(self._usage)
+
+    def reset_usage_summary(self) -> None:
+        for key in self._usage:
+            self._usage[key] = 0
 
     def check_available(self) -> bool:
         try:
@@ -211,6 +236,56 @@ class DeepSeekClient:
             })
 
         return result
+
+    def _record_usage(
+        self,
+        response: dict,
+        estimated_prompt_tokens: int = 0,
+        estimated_completion_tokens: int = 0,
+    ) -> None:
+        self._usage["requests"] += 1
+        self._usage["estimated_prompt_tokens"] += int(estimated_prompt_tokens or 0)
+        self._usage["estimated_completion_tokens"] += int(estimated_completion_tokens or 0)
+        self._usage["estimated_total_tokens"] += int(estimated_prompt_tokens or 0) + int(estimated_completion_tokens or 0)
+
+        usage = response.get("usage") if isinstance(response, dict) else None
+        if not isinstance(usage, dict):
+            return
+
+        prompt_tokens = self._usage_int(usage, "prompt_tokens", "input_tokens")
+        completion_tokens = self._usage_int(usage, "completion_tokens", "output_tokens")
+        total_tokens = self._usage_int(usage, "total_tokens")
+        if total_tokens <= 0:
+            total_tokens = prompt_tokens + completion_tokens
+
+        self._usage["prompt_tokens"] += prompt_tokens
+        self._usage["completion_tokens"] += completion_tokens
+        self._usage["total_tokens"] += total_tokens
+
+    @staticmethod
+    def _usage_int(usage: dict, *keys: str) -> int:
+        for key in keys:
+            value = usage.get(key)
+            if isinstance(value, (int, float)):
+                return int(value)
+        return 0
+
+    @staticmethod
+    def _estimate_payload_tokens(payload: dict) -> int:
+        messages = payload.get("messages", []) if isinstance(payload, dict) else []
+        total = 0
+        for item in messages:
+            if not isinstance(item, dict):
+                continue
+            total += Message.estimate_tokens(str(item.get("role") or ""))
+            total += Message.estimate_tokens(str(item.get("content") or ""))
+            tool_calls = item.get("tool_calls")
+            if tool_calls:
+                total += Message.estimate_tokens(json.dumps(tool_calls, ensure_ascii=False))
+        tools = payload.get("tools")
+        if tools:
+            total += Message.estimate_tokens(json.dumps(tools, ensure_ascii=False))
+        return total
 
     def _parse_response(self, response: dict) -> dict:
         result = {"text": None, "function_call": None, "function_calls": []}

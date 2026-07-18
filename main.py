@@ -206,19 +206,28 @@ def main():
     print()
 
     runtime = build_runtime(use_tools=use_tools, use_rag=use_rag)
+    usage_printed = False
+
+    def finish_session() -> None:
+        nonlocal usage_printed
+        if not usage_printed:
+            _print_token_usage(runtime)
+            usage_printed = True
+        print("👋 再见")
 
     while True:
         try:
             user_input = input("👤 你: ").strip()
         except (EOFError, KeyboardInterrupt):
-            print("\n👋 再见")
+            print()
+            finish_session()
             break
 
         if not user_input:
             continue
 
         if user_input.lower() == "/exit":
-            print("👋 再见")
+            finish_session()
             break
 
         if user_input.lower() == "/clear":
@@ -240,9 +249,42 @@ def main():
         try:
             reply = runtime.run(user_input)
             print(reply)
+        except KeyboardInterrupt:
+            print()
+            finish_session()
+            break
         except Exception as e:
             print(f"\n❌ 运行出错: {e}")
         print()
+
+
+def _print_token_usage(runtime: AgentRuntime) -> None:
+    summary = runtime.get_token_usage_summary() if hasattr(runtime, "get_token_usage_summary") else {}
+    api_usage = summary.get("api") or {}
+    requests = int(api_usage.get("requests") or 0)
+    actual_total = int(api_usage.get("total_tokens") or 0)
+    prompt_tokens = int(api_usage.get("prompt_tokens") or 0)
+    completion_tokens = int(api_usage.get("completion_tokens") or 0)
+    estimated_total = int(api_usage.get("estimated_total_tokens") or 0)
+    estimated_prompt = int(api_usage.get("estimated_prompt_tokens") or 0)
+    estimated_completion = int(api_usage.get("estimated_completion_tokens") or 0)
+    context_tokens = int(summary.get("context_tokens") or 0)
+    memory_messages = int(summary.get("memory_messages") or 0)
+
+    print("📊 本次会话 Token 统计")
+    if actual_total:
+        print(
+            f"  API 实际消耗: {actual_total} tokens "
+            f"(prompt {prompt_tokens}, completion {completion_tokens}, requests {requests})"
+        )
+    elif estimated_total:
+        print(
+            f"  API 估算消耗: ~{estimated_total} tokens "
+            f"(prompt ~{estimated_prompt}, completion ~{estimated_completion}, requests {requests})"
+        )
+    else:
+        print("  API 消耗: 0 tokens（本次没有完成的模型请求）")
+    print(f"  当前短期上下文: ~{context_tokens} tokens / {memory_messages} 条消息")
 
 
 def _handle_todo_command(runtime: AgentRuntime, raw_input: str) -> None:

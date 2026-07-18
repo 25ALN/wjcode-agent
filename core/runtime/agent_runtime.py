@@ -1972,12 +1972,35 @@ class AgentRuntime:
         if self.long_memory:
             self.long_memory.add_fact(fact)
 
+    def get_token_usage_summary(self) -> dict:
+        api_usage = {}
+        if hasattr(self.llm, "get_usage_summary"):
+            try:
+                api_usage = self.llm.get_usage_summary()
+            except Exception:
+                api_usage = {}
+
+        return {
+            "memory_messages": len(self.memory.messages),
+            "context_tokens": self.memory.total_tokens(),
+            "api": api_usage,
+        }
+
     def get_conversation_summary(self) -> str:
         parts = [
             f"当前对话轮数: {self._conversation_turns}",
             f"短期记忆消息数: {len(self.memory.messages)}",
             f"短期记忆 token 数: ~{self.memory.total_tokens()}",
         ]
+        usage = self.get_token_usage_summary().get("api") or {}
+        if usage.get("requests"):
+            actual_total = usage.get("total_tokens") or 0
+            estimated_total = usage.get("estimated_total_tokens") or 0
+            if actual_total:
+                parts.append(f"API token 消耗: {actual_total}")
+            elif estimated_total:
+                parts.append(f"API token 估算: ~{estimated_total}")
+
         if self.long_memory:
             parts.append(f"长期记忆事实数: {len(self.long_memory.facts)}")
             parts.append(f"长期记忆摘要数: {len(self.long_memory.summaries)}")
