@@ -514,7 +514,7 @@ class LongMemory:
         age_days = age_seconds / 86400
         return 1.0 / (1.0 + age_days)
 
-
+ 
 def _content_hash(text: str) -> str:
     normalized = _normalize_text(text)
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()

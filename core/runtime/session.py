@@ -221,6 +221,7 @@ class AgentSessionManager:
         enable_tools: bool = True,
         enable_permissions: bool = True,
         memory_embedder: Optional[Any] = None,
+        enable_multi_agent: bool = False,
     ):
         self.llm_factory = llm_factory
         self.workspace_root = os.path.abspath(workspace_root or os.getcwd())
@@ -229,6 +230,7 @@ class AgentSessionManager:
         self.enable_tools = enable_tools
         self.enable_permissions = enable_permissions
         self.memory_embedder = memory_embedder
+        self.enable_multi_agent = enable_multi_agent
         self._sessions: Dict[str, AgentSession] = {}
         self._archived_api_usage = self._empty_api_usage()
 
@@ -342,6 +344,7 @@ class AgentSessionManager:
             planning_manager=planning_manager,
             permission_fn=permission_fn,
             context_compressor=context_compressor,
+            enable_multi_agent=self.enable_multi_agent,
             session_id=sid,
         )
         runtime.todo_store = todo_store

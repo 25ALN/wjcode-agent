@@ -124,6 +124,7 @@ class AgentRuntime:
         context_compressor: Optional[object] = None,
         scratchpad: Optional[Scratchpad] = None,
         session_id: Optional[str] = None,
+        enable_multi_agent: bool = False,
     ):
         self.llm = llm_client
         self.memory = memory or ShortMemory(max_length=60, max_tokens=max_conversation_tokens)
@@ -150,8 +151,22 @@ class AgentRuntime:
         self._pending_tools: Optional[List[Dict[str, Any]]] = None
         self._pending_tool_round = 0
         self._pending_text: Optional[str] = None
+        self.multi_agent_orchestrator = None
+        if enable_multi_agent:
+            # Imported lazily to keep the single-agent runtime dependency graph intact.
+            from core.multi_agent import MultiAgentOrchestrator
+            self.multi_agent_orchestrator = MultiAgentOrchestrator(self)
 
     def run(self, user_input: str) -> str:
+        if (
+            self.multi_agent_orchestrator is not None
+            and self.multi_agent_orchestrator.should_delegate(user_input)
+        ):
+            final = ""
+            for event in self.run_events(user_input):
+                if event.type == FINAL:
+                    final = str(event.data.get("content") or "")
+            return final or "[多 Agent 工作流未返回最终结果]"
         user_message = Message(role="user", content=user_input)
         self.memory.add_message(user_message)
         self._start_scratchpad(user_input)
@@ -176,6 +191,16 @@ class AgentRuntime:
             yield self._event(DONE, {})
             return
 
+        if (
+            self.multi_agent_orchestrator is not None
+            and self.multi_agent_orchestrator.waiting_for_permission
+        ):
+            yield self._event(ERROR, {
+                "message": "当前有等待权限确认的多 Agent 工具调用，请先调用 resume_events()",
+            })
+            yield self._event(DONE, {})
+            return
+
         try:
             user_message = Message(role="user", content=user_input)
             self.memory.add_message(user_message)
@@ -190,6 +215,13 @@ class AgentRuntime:
                 if update is not None and update.changed:
                     yield self._event(PLANNING_UPDATE, self._planning_payload(update))
                     yield self._event(TODO_UPDATE, self._todo_payload())
+
+            if (
+                self.multi_agent_orchestrator is not None
+                and self.multi_agent_orchestrator.should_delegate(user_input)
+            ):
+                yield from self.multi_agent_orchestrator.run_events(user_input)
+                return
 
             if self._should_expose_tools(user_input):
                 yield from self._run_native_tools_events(user_input)
@@ -448,6 +480,13 @@ class AgentRuntime:
 
     def resume_events(self, approved: bool) -> Generator[AgentEvent, None, None]:
         """Resume a paused Web/API run after a permission decision."""
+        if (
+            self.multi_agent_orchestrator is not None
+            and self.multi_agent_orchestrator.waiting_for_permission
+        ):
+            yield from self.multi_agent_orchestrator.resume_events(approved)
+            return
+
         if self._pending_tool_call is None:
             yield self._event(ERROR, {"message": "没有等待恢复的工具调用"})
             return

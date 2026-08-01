@@ -3,6 +3,7 @@
 用法:
     python3 main.py              # 纯聊天（无工具/无RAG）
     python3 main.py --tools      # 启用全部工具（读写文件/执行代码/联网搜索）
+    python3 main.py --tools --multi-agent  # 启用主管 + Explore/Implement/Test 工作流
     python3 main.py --tools --rag  # 全部启用（含RAG知识库）
 
 LLM 后端：DeepSeek API（deepseek-chat）
@@ -84,7 +85,7 @@ RAG_SYSTEM_PROMPT = (
 )
 
 
-def build_runtime(use_tools: bool = False, use_rag: bool = False) -> AgentRuntime:
+def build_runtime(use_tools: bool = False, use_rag: bool = False, use_multi_agent: bool = False) -> AgentRuntime:
     project_root = os.path.dirname(__file__)
 
     try:
@@ -175,6 +176,7 @@ def build_runtime(use_tools: bool = False, use_rag: bool = False) -> AgentRuntim
         planning_manager=planning_manager,
         permission_fn=permission_fn,
         context_compressor=context_compressor,
+        enable_multi_agent=use_multi_agent,
     )
     runtime.todo_store = todo_store
     return runtime
@@ -183,6 +185,7 @@ def build_runtime(use_tools: bool = False, use_rag: bool = False) -> AgentRuntim
 def main():
     use_tools = "--tools" in sys.argv
     use_rag = "--rag" in sys.argv
+    use_multi_agent = "--multi-agent" in sys.argv
 
     project_root = os.path.dirname(__file__)
 
@@ -191,6 +194,7 @@ def main():
     print("=" * 55)
     print(f"  模型: deepseek-chat | 上下文: 128K")
     print(f"  工具: {'✅ 启用' if use_tools else '❌ 禁用'}  |  RAG: {'✅ 启用' if use_rag else '❌ 禁用'}")
+    print(f"  多 Agent: {'✅ 启用' if use_multi_agent else '❌ 禁用'}（复杂执行任务才会委派）")
 
     project_ctx = ProjectContext(os.path.join(project_root, "AGENT.md"))
     if project_ctx.is_loaded:
@@ -200,12 +204,13 @@ def main():
     print("  输入对话内容，/exit 退出，/clear 清空记忆")
     print("  /todo show | add <描述> | start <序号> | done <序号> [结果] | block <序号> [原因]")
     print("  复杂任务会先进入 Planning 模式，再在执行中持续重规划")
+    print("  --multi-agent 会让复杂执行任务依次交给 Explore、Implement、Test，再由主管汇总")
     if use_rag:
         print("  💡 RAG 示例问题: '这个项目采用什么架构？'")
     print("=" * 55)
     print()
 
-    runtime = build_runtime(use_tools=use_tools, use_rag=use_rag)
+    runtime = build_runtime(use_tools=use_tools, use_rag=use_rag, use_multi_agent=use_multi_agent)
     usage_printed = False
 
     def finish_session() -> None:

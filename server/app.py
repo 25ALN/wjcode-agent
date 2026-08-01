@@ -91,6 +91,7 @@ def create_default_service(
         storage_root=storage,
         enable_tools=True,
         enable_permissions=True,
+        enable_multi_agent=os.getenv("AGENT_ENABLE_MULTI_AGENT", "").strip().lower() in {"1", "true", "yes", "on"},
     )
     return AgentWebService(manager)
 

@@ -13,6 +13,8 @@ from core.runtime.events import (
     FINAL,
     ERROR,
     DONE,
+    AGENT_TASK_UPDATE,
+    AGENT_TASK_RESULT,
     make_event,
 )
 
@@ -33,6 +35,8 @@ __all__ = [
     "FINAL",
     "ERROR",
     "DONE",
+    "AGENT_TASK_UPDATE",
+    "AGENT_TASK_RESULT",
     "make_event",
 ]
 

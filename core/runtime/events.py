@@ -17,6 +17,8 @@ PERMISSION_REQUEST = "permission_request"
 FINAL = "final"
 ERROR = "error"
 DONE = "done"
+AGENT_TASK_UPDATE = "agent_task_update"
+AGENT_TASK_RESULT = "agent_task_result"
 
 
 @dataclass

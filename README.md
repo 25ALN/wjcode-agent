@@ -7,6 +7,7 @@
 ## 核心能力
 
 - **ReAct + Planning 混合执行**：简单问题直接回答或轻量 ReAct；复杂编程任务进入 Planning，执行过程中根据工具观察继续调整计划。
+- **轻量 Multi-Agent Workflow（可选）**：复杂执行任务由 Coordinator 先委派给 Explore；依据 Worker Result 动态决定结束或继续 Implement -> Test。测试失败会携带 evidence 回流 Implement，默认最多重试 2 次。
 - **Runtime 主导的项目分析**：分析整个项目、架构、亮点、难点时进入 Project Analysis Session，由 Runtime 维护 checklist、coverage、evidence 和 search planner，避免模型读几个文件就提前总结。
 - **Function Calling 工具循环**：支持 `ls`、`grep`、`read_file`、`write_file`、`edit_file`、`execute_code`、`web_search`、`update_todo`。
 - **权限系统**：写文件、编辑文件、执行代码、联网搜索等操作按风险级别确认；Web 端支持权限挂起和恢复。
@@ -48,6 +49,9 @@ DEEPSEEK_API_KEY=你的密钥
 DEEPSEEK_MODEL=deepseek-chat
 DEEPSEEK_TIMEOUT=30
 DEEPSEEK_RETRY_TIMES=1
+
+# 可选：启用 Web 会话中的轻量 Multi-Agent Workflow
+AGENT_ENABLE_MULTI_AGENT=true
 ```
 
 
@@ -55,9 +59,19 @@ DEEPSEEK_RETRY_TIMES=1
 
 ### Web UI 推荐方式
 
+默认启动：
+
 ```bash
 python -m server.main --host 127.0.0.1 --port 8000
 ```
+
+启用多 Agent 后端工作流：
+
+```bash
+AGENT_ENABLE_MULTI_AGENT=true python -m server.main --host 127.0.0.1 --port 8000
+```
+
+页面保持单聊天窗口；复杂执行任务会在后端执行动态的 Explore / Implement / Test 协作。
 
 然后打开：
 
@@ -91,6 +105,12 @@ python main.py --tools
 
 ```bash
 python main.py --tools --rag
+```
+
+启用工具和轻量 Multi-Agent Workflow：
+
+```bash
+python main.py --tools --multi-agent
 ```
 
 CLI 中输入 `/exit` 或按 `Ctrl+C` 退出时，会输出本次 CLI 会话的 token 统计。
@@ -133,6 +153,7 @@ Todo 数据在 CLI 模式下保存到 `.agent_todo.json`，Web/API 每个 sessio
 ├── README.md                # 项目使用说明
 ├── core/
 │   ├── runtime/             # AgentRuntime、Project Analysis、Session、Message、Events
+│   ├── multi_agent/         # Coordinator、任务模型、动态 Explore / Implement / Test 编排
 │   ├── context/             # Context Builder、Scratchpad、Compression、ProjectContext
 │   ├── memory/              # ShortMemory、LongMemory、结构化记忆检索和去重
 │   ├── planning/            # PlanningManager、PlanState、重规划逻辑

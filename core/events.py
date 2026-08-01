@@ -4,6 +4,8 @@ from core.runtime.events import (
     AgentEvent,
     ASSISTANT_TEXT,
     DONE,
+    AGENT_TASK_UPDATE,
+    AGENT_TASK_RESULT,
     ERROR,
     FINAL,
     PERMISSION_REQUEST,
@@ -27,6 +29,8 @@ __all__ = [
     "FINAL",
     "ERROR",
     "DONE",
+    "AGENT_TASK_UPDATE",
+    "AGENT_TASK_RESULT",
     "make_event",
 ]
 

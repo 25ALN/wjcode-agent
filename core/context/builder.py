@@ -33,8 +33,7 @@ def build_context(
             role="system",
             content=f"【当前执行计划】\n{planning_context}\n请按计划推进；如果工具结果显示计划不合适，请先调整计划再继续执行。",
         ))
-
-
+    
     if scratchpad_context:
         context.append(Message(
             role="system",
@@ -44,10 +43,10 @@ def build_context(
                 "这是当前任务的显式中间状态记录；请仅把它当作可验证的工作笔记，不要输出隐藏推理。"
             ),
         ))
-
+    
     # 长期记忆注入（在系统指令后，对话历史前）
     if long_memory_context:
-        context.append(Message(
+        context.append(Message( 
             role="system",
             content=f"【长期记忆参考】\n{long_memory_context}",
         ))
@@ -70,7 +69,6 @@ def build_context(
     context.extend(messages)
 
     return context
-
 
 def build_short_context(
     system_prompt: str,
