@@ -48,6 +48,7 @@ class WebPermissionController:
 
     def __init__(self, manager: PermissionManager):
         self.manager = manager
+        self.last_denial_reason = ""
         self._pending: Dict[str, PendingPermissionRequest] = {}
 
     @property
@@ -58,8 +59,10 @@ class WebPermissionController:
         return None
 
     def approve(self, tool_name: str, args: dict) -> bool:
+        self.last_denial_reason = ""
         decision = self.manager.decide(tool_name, args)
         if not decision.allowed:
+            self.last_denial_reason = decision.reason
             return False
         if not decision.requires_approval:
             return True

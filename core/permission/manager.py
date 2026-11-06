@@ -12,6 +12,16 @@ from typing import Any, Callable, Optional
 
 from tools.base_tool import SAFE, CAUTION, DANGEROUS
 from tools.registry import ToolRegistry
+from tools.security import (
+    contains_sudo,
+    contains_sensitive_reference,
+    contains_system_path_reference,
+    is_inside_workspace,
+    is_system_path,
+    parse_read_only_shell_command,
+    path_security_reason,
+    resolve_path,
+)
 
 
 RISK_ORDER = {
@@ -47,23 +57,29 @@ class PermissionManager:
         enforce_workspace: bool = True,
     ):
         self.tool_registry = tool_registry
-        self.project_root = os.path.abspath(project_root or os.getcwd())
+        self.project_root = os.path.realpath(os.path.abspath(project_root or os.getcwd()))
         self.input_fn = input_fn
         self.output_fn = output_fn
         self.require_approval = require_approval
         self.allow_dangerous = allow_dangerous
         self.enforce_workspace = enforce_workspace
+        self.last_denial_reason = ""
 
     def approve(self, tool_name: str, args: dict) -> bool:
+        self.last_denial_reason = ""
         decision = self.decide(tool_name, args)
         if not decision.allowed:
+            self.last_denial_reason = decision.reason
             self.output_fn(self._format_block_message(decision))
             return False
 
         if not decision.requires_approval:
             return True
 
-        return self.request_approval(decision, args)
+        approved = self.request_approval(decision, args)
+        if not approved:
+            self.last_denial_reason = "用户拒绝了本次操作，请停止重试。"
+        return approved
 
     def decide(self, tool_name: str, args: dict) -> PermissionDecision:
         tool = self.tool_registry.get(tool_name) if self.tool_registry else None
@@ -82,6 +98,10 @@ class PermissionManager:
         risk_level = self._max_risk(risk_level, dynamic_risk)
         if dynamic_reason:
             reasons.append(dynamic_reason)
+
+        code_decision = self._check_code_access(tool_name, args)
+        if code_decision is not None:
+            return code_decision
 
         path_decision = self._check_paths(tool_name, args)
         if path_decision is not None:
@@ -123,6 +143,8 @@ class PermissionManager:
 
     def _dynamic_risk(self, tool_name: str, args: dict) -> tuple[str, str]:
         if tool_name == "execute_code" and args.get("mode") == "shell":
+            if parse_read_only_shell_command(args.get("code", "")) is not None:
+                return SAFE, "受限只读命令，可自动执行"
             return DANGEROUS, "shell 命令可执行任意系统操作"
 
         if tool_name == "web_search":
@@ -143,12 +165,20 @@ class PermissionManager:
             return None
 
         abs_path = self._resolve_path(path)
-        if self._is_system_path(abs_path):
+        # Browsing, editing, and writing all pass through this check.  A
+        # sensitive target is denied before an approval prompt so a caller
+        # cannot accidentally approve a secret read or overwrite.
+        sensitive_reason = path_security_reason(
+            path,
+            self.project_root,
+            check_readability=tool_name not in WORKSPACE_WRITE_TOOLS,
+        )
+        if sensitive_reason is not None:
             return PermissionDecision(
                 tool_name=tool_name,
                 risk_level=DANGEROUS,
                 allowed=False,
-                reason=f"拒绝访问系统路径: {abs_path}",
+                reason=sensitive_reason,
             )
 
         if self.enforce_workspace and not self._is_inside_project(abs_path):
@@ -170,34 +200,87 @@ class PermissionManager:
 
         return None
 
+    def _check_shell_command(self, tool_name: str, args: dict) -> Optional[PermissionDecision]:
+        if tool_name != "execute_code" or args.get("mode") != "shell":
+            return None
+
+        command = args.get("code", "")
+        if contains_sudo(command):
+            return PermissionDecision(
+                tool_name=tool_name,
+                risk_level=DANGEROUS,
+                allowed=False,
+                reason="拒绝执行 sudo 命令；当前工具不会提权，请勿重试。",
+            )
+        if contains_sensitive_reference(command):
+            return PermissionDecision(
+                tool_name=tool_name, risk_level=DANGEROUS, allowed=False,
+                reason="拒绝执行包含敏感文件访问的命令；请停止重试。",
+            )
+        if contains_system_path_reference(command):
+            return PermissionDecision(
+                tool_name=tool_name, risk_level=DANGEROUS, allowed=False,
+                reason="拒绝执行包含系统路径访问的命令；当前工具不会提权，请停止重试。",
+            )
+        parsed = parse_read_only_shell_command(command)
+        if parsed is None:
+            return None
+
+        outside_path = None
+        for path in parsed["paths"]:
+            resolved = self._resolve_path(path)
+            protected_reason = path_security_reason(path, self.project_root)
+            if protected_reason is not None:
+                return PermissionDecision(
+                    tool_name=tool_name,
+                    risk_level=DANGEROUS,
+                    allowed=False,
+                    reason=protected_reason,
+                )
+            if self.enforce_workspace and not is_inside_workspace(resolved, self.project_root):
+                outside_path = resolved
+
+        if outside_path:
+            return PermissionDecision(
+                tool_name=tool_name, risk_level=CAUTION, allowed=True,
+                reason=f"只读命令访问工作区外路径需要确认: {outside_path}",
+                requires_approval=self.require_approval,
+            )
+
+        return PermissionDecision(
+            tool_name=tool_name,
+            risk_level=SAFE,
+            allowed=True,
+            reason="受限只读命令，可自动执行",
+        )
+
+    def _check_code_access(self, tool_name: str, args: dict) -> Optional[PermissionDecision]:
+        if tool_name != "execute_code":
+            return None
+        if args.get("mode") == "shell":
+            return self._check_shell_command(tool_name, args)
+        code = args.get("code", "")
+        if contains_sensitive_reference(code):
+            return PermissionDecision(
+                tool_name=tool_name, risk_level=DANGEROUS, allowed=False,
+                reason="拒绝执行包含敏感文件访问的代码；请停止重试。",
+            )
+        if contains_system_path_reference(code):
+            return PermissionDecision(
+                tool_name=tool_name, risk_level=DANGEROUS, allowed=False,
+                reason="拒绝执行包含系统路径访问的代码；当前工具不会提权，请停止重试。",
+            )
+        return None
+
     def _resolve_path(self, path: str) -> str:
-        if os.path.isabs(path):
-            return os.path.abspath(path)
-        return os.path.abspath(os.path.join(self.project_root, path))
+        return resolve_path(path, self.project_root)
 
     def _is_inside_project(self, path: str) -> bool:
-        try:
-            return os.path.commonpath([self.project_root, os.path.abspath(path)]) == self.project_root
-        except ValueError:
-            return False
+        return is_inside_workspace(path, self.project_root)
 
     @staticmethod
     def _is_system_path(path: str) -> bool:
-        normalized = os.path.normpath(path)
-        restricted_prefixes = (
-            "/dev",
-            "/proc",
-            "/sys",
-            "/boot",
-            "/etc",
-            "/usr/bin",
-            "/usr/sbin",
-            "/bin",
-            "/sbin",
-        )
-        return normalized in restricted_prefixes or any(
-            normalized.startswith(prefix + os.sep) for prefix in restricted_prefixes
-        )
+        return is_system_path(path)
 
     @staticmethod
     def _max_risk(left: str, right: str) -> str:
