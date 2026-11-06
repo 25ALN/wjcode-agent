@@ -499,7 +499,7 @@ class AgentSessionManager:
         registry = ToolRegistry()
         registry.register(FileReadTool(workspace_root=workspace_root))
         registry.register(FileWriteTool(workspace_root=workspace_root))
-        registry.register(CodeExecutorTool())
+        registry.register(CodeExecutorTool(workspace_root=workspace_root))
         registry.register(WebSearchTool())
         registry.register(LSTool(workspace_root=workspace_root))
         registry.register(GrepTool(workspace_root=workspace_root))

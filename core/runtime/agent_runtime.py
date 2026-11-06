@@ -68,7 +68,7 @@ FRESH_INFO_TIME_KEYWORDS = (
     "本周", "周一", "周二", "周三", "周四", "周五", "周六", "周日",
     "实时", "最新", "当前", "现在",
 )
-LOCATION_HINT_KEYWORDS = ("省", "市", "区", "县", "镇", "街道", "贵州", "贵阳", "南明")
+LOCATION_HINT_KEYWORDS = ("省", "市", "区", "县", "镇", "街道")
 EXTERNAL_SEARCH_CONTINUATION_HINTS = (
     "查吧", "查一下", "查询一下", "搜吧", "搜一下", "搜索一下", "那就查", "帮我查",
 )
@@ -183,7 +183,6 @@ class AgentRuntime:
         return self._run_with_callback_tool()
 
     def run_events(self, user_input: str) -> Generator[AgentEvent, None, None]:
-        """Run the agent and emit structured events for Web/API layers."""
         if self._pending_tool_call is not None:
             yield self._event(ERROR, {
                 "message": "当前有等待权限确认的工具调用，请先调用 resume_events()",
@@ -268,7 +267,7 @@ class AgentRuntime:
         has_soft_action = contains_keyword(lower, TOOL_SOFT_ACTION_KEYWORDS)
         has_resource_hint = contains_keyword(lower, TOOL_RESOURCE_KEYWORDS) or looks_like_file_reference(lower)
         has_action_intent = has_hard_action or (has_soft_action and has_resource_hint)
-
+        
         if has_direct_answer_hint and not self._is_explicit_tool_request(
             lower,
             has_hard_action=has_hard_action,
@@ -599,7 +598,7 @@ class AgentRuntime:
                         continue
                     return self._force_final_answer_from_tool_context(context, user_input, explorer)
                 return self._finalize_response(text)
-
+ 
             #text + function_call 共存 → 缓存文本，继续执行工具
             if text and function_calls:
                 pending_text = text
@@ -622,6 +621,7 @@ class AgentRuntime:
                 plan_changed = False
 
                 for function_call in function_calls:
+                    #工具名称与参数
                     fn_name = function_call.get("name", "")
                     fn_args = function_call.get("args", {})
 
@@ -1613,7 +1613,7 @@ class AgentRuntime:
             index += 1
 
         return safe
-
+ 
     @staticmethod
     def _message_function_calls(msg: Message) -> List[dict]:
         metadata = msg.metadata or {}
@@ -1826,11 +1826,14 @@ class AgentRuntime:
             try:
                 approved = self.permission_fn(name, args)
                 if not approved:
-                    return f"[权限拒绝] Tool '{name}' 需要用户确认，但未获批准。"
+                    controller = getattr(self.permission_fn, "__self__", None)
+                    reason = getattr(controller, "last_denial_reason", "")
+                    return f"[权限拒绝] Tool '{name}': {reason or '未获批准，请停止重试。'}"
             except PermissionPending:
                 raise
             except Exception as e:
                 logger.warning(f"权限检查异常: {e}")
+                return f"[权限拒绝] Tool '{name}' 权限检查失败，未执行；请停止重试。"
 
         try:
             result = self.tool_registry.execute(name, **args)
