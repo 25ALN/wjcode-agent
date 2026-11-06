@@ -9,6 +9,7 @@ from fnmatch import fnmatch
 from typing import Iterable, List
 
 from tools.base_tool import BaseTool, SAFE, CAUTION
+from tools.security import is_sensitive_name, path_security_reason, is_inside_workspace
 
 
 DEFAULT_EXCLUDES = {
@@ -44,6 +45,9 @@ class LSTool(BaseTool):
 
     def execute(self, path: str = ".", recursive: bool = False, max_entries: int = 200, **kwargs) -> str:
         root = _resolve_path(path, self.workspace_root)
+        security_reason = path_security_reason(root, self.workspace_root)
+        if security_reason:
+            return f"[拒绝] {security_reason}"
         if not os.path.exists(root):
             return f"[错误] 路径不存在: {root}"
         if not os.path.isdir(root):
@@ -55,7 +59,19 @@ class LSTool(BaseTool):
 
         if recursive:
             for current, dirs, files in os.walk(root):
-                dirs[:] = sorted(d for d in dirs if d not in DEFAULT_EXCLUDES and not d.startswith("."))
+                safe_dirs = []
+                for d in dirs:
+                    full_dir = os.path.join(current, d)
+                    if (
+                        d in DEFAULT_EXCLUDES
+                        or d.startswith(".")
+                        or is_sensitive_name(d)
+                        or path_security_reason(full_dir, self.workspace_root)
+                        or not is_inside_workspace(full_dir, root)
+                    ):
+                        continue
+                    safe_dirs.append(d)
+                dirs[:] = sorted(safe_dirs)
                 files = sorted(files)
                 rel = os.path.relpath(current, root)
                 depth = 0 if rel == "." else rel.count(os.sep) + 1
@@ -63,7 +79,13 @@ class LSTool(BaseTool):
                     lines.append(f"{'  ' * (depth - 1)}{os.path.basename(current)}/")
                     count += 1
                 for fname in files:
-                    if _is_noise_file(fname):
+                    full_file = os.path.join(current, fname)
+                    if (
+                        _is_noise_file(fname)
+                        or is_sensitive_name(fname)
+                        or path_security_reason(full_file, self.workspace_root)
+                        or not is_inside_workspace(full_file, root)
+                    ):
                         continue
                     lines.append(f"{'  ' * depth}{fname}")
                     count += 1
@@ -72,7 +94,13 @@ class LSTool(BaseTool):
                         return "\n".join(lines)
         else:
             for name in sorted(os.listdir(root)):
-                if name in DEFAULT_EXCLUDES or _is_noise_file(name):
+                if (
+                    name in DEFAULT_EXCLUDES
+                    or _is_noise_file(name)
+                    or is_sensitive_name(name)
+                    or path_security_reason(os.path.join(root, name), self.workspace_root)
+                    or not is_inside_workspace(os.path.join(root, name), root)
+                ):
                     continue
                 full = os.path.join(root, name)
                 suffix = "/" if os.path.isdir(full) else ""
@@ -113,6 +141,9 @@ class GrepTool(BaseTool):
         **kwargs,
     ) -> str:
         root = _resolve_path(path, self.workspace_root)
+        security_reason = path_security_reason(root, self.workspace_root)
+        if security_reason:
+            return f"[拒绝] {security_reason}"
         if not os.path.exists(root):
             return f"[错误] 路径不存在: {root}"
 
@@ -124,11 +155,18 @@ class GrepTool(BaseTool):
         max_results = _clamp(max_results, 1, 1000)
         files = [root] if os.path.isfile(root) else _iter_files(root, file_pattern)
         matches = []
+        blocked = []
 
         for fpath in files:
             if len(matches) >= max_results:
                 break
             if os.path.isfile(fpath) and not fnmatch(os.path.basename(fpath), file_pattern):
+                continue
+            file_security_reason = path_security_reason(fpath, self.workspace_root)
+            if os.path.isdir(root) and not is_inside_workspace(fpath, root):
+                file_security_reason = f"符号链接指向搜索范围外: {fpath}。已跳过，请勿重试。"
+            if file_security_reason:
+                blocked.append(file_security_reason)
                 continue
             if _looks_binary(fpath):
                 continue
@@ -140,14 +178,20 @@ class GrepTool(BaseTool):
                             matches.append(f"{rel}:{lineno}: {line.rstrip()}")
                             if len(matches) >= max_results:
                                 break
+            except PermissionError:
+                blocked.append(f"当前进程没有读取权限: {fpath}。不会提权，请停止重试。")
             except (UnicodeDecodeError, OSError):
                 continue
 
         header = f"搜索: /{pattern}/ in {root} ({file_pattern})"
+        blocked_note = ""
+        if blocked:
+            unique_blocked = list(dict.fromkeys(blocked))
+            blocked_note = "\n" + "\n".join(f"[跳过] {reason}" for reason in unique_blocked[:20])
         if not matches:
-            return header + "\n未找到匹配结果"
+            return header + blocked_note + "\n未找到匹配结果"
         suffix = "" if len(matches) < max_results else f"\n...(已截断，仅显示前 {max_results} 条)"
-        return header + "\n" + "\n".join(matches) + suffix
+        return header + blocked_note + "\n" + "\n".join(matches) + suffix
 
 
 class EditTool(BaseTool):
@@ -179,6 +223,9 @@ class EditTool(BaseTool):
         **kwargs,
     ) -> str:
         abs_path = _resolve_path(path, self.workspace_root)
+        security_reason = path_security_reason(abs_path, self.workspace_root)
+        if security_reason:
+            return f"[拒绝] {security_reason}"
         if not os.path.exists(abs_path):
             return f"[错误] 文件不存在: {abs_path}"
         if not os.path.isfile(abs_path):
@@ -251,7 +298,19 @@ def _clamp(value: int, low: int, high: int) -> int:
 
 def _iter_files(root: str, file_pattern: str) -> Iterable[str]:
     for current, dirs, files in os.walk(root):
-        dirs[:] = sorted(d for d in dirs if d not in DEFAULT_EXCLUDES and not d.startswith("."))
+        safe_dirs = []
+        for d in dirs:
+            full_dir = os.path.join(current, d)
+            if (
+                d in DEFAULT_EXCLUDES
+                or d.startswith(".")
+                or is_sensitive_name(d)
+                or path_security_reason(full_dir, root)
+                or not is_inside_workspace(full_dir, root)
+            ):
+                continue
+            safe_dirs.append(d)
+        dirs[:] = sorted(safe_dirs)
         for fname in sorted(files):
             if _is_noise_file(fname) or not fnmatch(fname, file_pattern):
                 continue

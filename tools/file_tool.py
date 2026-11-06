@@ -2,6 +2,7 @@ import os
 import logging
 from typing import Optional
 from tools.base_tool import BaseTool, SAFE, CAUTION
+from tools.security import path_security_reason
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +79,9 @@ class FileReadTool(BaseTool):
         """
         # 路径存在性检查
         abs_path = self._resolve_path(path)
+        security_reason = path_security_reason(abs_path, self.workspace_root)
+        if security_reason:
+            return f"[拒绝] {security_reason}"
         if not os.path.exists(abs_path):
             return f"[错误] 文件不存在: {abs_path}"
 
@@ -100,7 +104,7 @@ class FileReadTool(BaseTool):
             else:
                 return f"[错误] 无法解码文件 '{abs_path}'（尝试了 utf-8, gbk, latin-1）"
         except PermissionError:
-            return f"[错误] 没有权限读取文件: {abs_path}"
+            return f"[权限拒绝] 当前进程没有读取权限: {abs_path}。不会提权，请停止重试。"
         except OSError as e:
             return f"[错误] 读取文件失败: {e}"
 
@@ -238,6 +242,13 @@ class FileWriteTool(BaseTool):
             操作结果描述
         """
         abs_path = self._resolve_path(path)
+        security_reason = path_security_reason(
+            abs_path,
+            self.workspace_root,
+            check_readability=False,
+        )
+        if security_reason:
+            return f"[拒绝] {security_reason}"
 
         # 安全检查：不允许写入到 /dev, /proc, /sys 等系统目录
         if self._is_restricted_path(abs_path):
