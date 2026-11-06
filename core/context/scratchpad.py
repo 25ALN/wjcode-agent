@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Dict, List, Optional
 
-
+    
 SCRATCHPAD_SECTIONS = (
     "objective",
     "facts",
@@ -45,6 +45,7 @@ class Scratchpad:
 
     def add_file(self, path: str, note: Optional[str] = None) -> bool:
         path_text = self._normalize(path, 160)
+        
         if not path_text:
             return False
         entry = path_text
@@ -74,6 +75,7 @@ class Scratchpad:
             target = path or args.get("pattern") or args.get("query")
             if target:
                 self.add_fact(f"{tool_name}: inspected {target}")
+
 
         if observation_text:
             self.add_attempt(f"{tool_name}: {observation_text}")

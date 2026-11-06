@@ -91,3 +91,4 @@ def build_short_context(
 
     context.append(Message(role="user", content=user_input))
     return context
+
