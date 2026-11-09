@@ -14,12 +14,14 @@ from core.runtime.events import (
     TOOL_CALL,
     TOOL_RESULT,
     USER_MESSAGE,
+    ROUTING_UPDATE,
     make_event,
 )
 
 __all__ = [
     "AgentEvent",
     "USER_MESSAGE",
+    "ROUTING_UPDATE",
     "ASSISTANT_TEXT",
     "TOOL_CALL",
     "TOOL_RESULT",

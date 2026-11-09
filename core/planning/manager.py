@@ -8,6 +8,7 @@ from core.todo import TodoList
 from core.intent import contains_keyword
 
 logger = logging.getLogger(__name__)
+COMPLEX_KEYWORDS = ()  # Compatibility export; routing no longer uses complexity keywords.
 
 
 ACTION_KEYWORDS = (
@@ -45,17 +46,6 @@ ACTION_KEYWORDS = (
     "testing",
     "debug",
     "debugging",
-)
-
-COMPLEX_KEYWORDS = (
-    "全部",
-    "阶段",
-    "复杂",
-    "规划",
-    "多步",
-    "多个",
-    "一系列",
-    "feature",
 )
 
 EXPLANATION_HINTS = (
@@ -138,7 +128,7 @@ class PlanningManager:
         enable_llm_planning: bool = False,
     ):
         self.todo_list = todo_list
-        self.min_complex_length = min_complex_length
+        # Retained constructor argument for callers; text length no longer routes tasks.
         self.enable_llm_planning = enable_llm_planning
         self.state = PlanState(objective="")
 
@@ -147,37 +137,21 @@ class PlanningManager:
         self.state = PlanState(objective="")
 
     def should_plan(self, user_input: str) -> bool:
-        text = user_input.strip()
-        if not text:
-            return False
-
-        lower = text.lower()
-        has_action = contains_keyword(lower, ACTION_KEYWORDS)
-        has_explanation = contains_keyword(lower, EXPLANATION_HINTS)
-
-        # “复杂任务如何处理”这类是机制解释，不是需要拆解执行的复杂任务。
-        if has_explanation and not has_action:
-            return False
-
-        if not has_action:
-            return False
-
-        if len(text) >= self.min_complex_length:
-            return True
-
-        return contains_keyword(lower, COMPLEX_KEYWORDS)
+        """Compatibility query; mode selection belongs to TaskRouter."""
+        return self.state.mode == "planning" and self.state.objective == user_input.strip()
 
     def start_or_update_plan(
         self,
         user_input: str,
         llm_client: Optional[Any] = None,
         force: bool = False,
+        steps: Optional[List[str]] = None,
     ) -> PlanningUpdate:
-        if not force and not self.should_plan(user_input):
+        if not force and not steps and not self.should_plan(user_input):
             self.state.mode = "react"
-            return PlanningUpdate(False, "任务较简单，使用纯 ReAct", self.state)
+            return PlanningUpdate(False, "路由未请求计划，使用 ReAct", self.state)
 
-        steps = self._generate_steps(user_input, llm_client)
+        steps = steps or self._generate_steps(user_input, llm_client)
         self.state = PlanState(
             objective=user_input.strip(),
             steps=steps,
@@ -185,7 +159,7 @@ class PlanningManager:
             mode="planning",
         )
         self._sync_todo_with_plan(steps)
-        return PlanningUpdate(True, "复杂任务已创建 Planning 计划", self.state)
+        return PlanningUpdate(True, "依赖阶段已创建 Planning 计划", self.state)
 
     def observe_tool_result(self, tool_name: str, args: dict, observation: str) -> PlanningUpdate:
         if self.state.mode != "planning":
@@ -243,6 +217,8 @@ class PlanningManager:
     @staticmethod
     def _fallback_steps(user_input: str) -> List[str]:
         text = user_input.lower()
+        if not contains_keyword(text, ("修改", "修复", "实现", "新增", "重构", "fix", "implement", "refactor")):
+            return ["收集与目标有关的证据", "完成请求的查询或验证", "汇报结果和不确定项"]
         steps = ["分析相关项目结构和现有实现"]
 
         if any(word in text for word in ("bug", "修复", "错误", "失败", "报错", "fix")):

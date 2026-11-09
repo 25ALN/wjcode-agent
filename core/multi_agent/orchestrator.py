@@ -40,7 +40,6 @@ ACTION_KEYWORDS = (
     "测试", "运行", "执行", "检查", "调试", "定位", "复现", "编写",
     "fix", "implement", "refactor", "test", "debug", "run",
 )
-COMPLEXITY_KEYWORDS = ("全部", "多个", "多步", "完整", "复杂", "项目", "仓库", "代码库")
 
 ROLE_TOOLS = {
     AgentRole.EXPLORE: ("ls", "grep", "read_file"),
@@ -87,11 +86,8 @@ class MultiAgentOrchestrator:
         self._retry_count = 0
 
     @staticmethod
-    def should_delegate(user_input: str) -> bool:
-        text = str(user_input or "").strip().lower()
-        if not text or not contains_keyword(text, ACTION_KEYWORDS):
-            return False
-        return len(text) >= 32 or contains_keyword(text, COMPLEXITY_KEYWORDS)
+    def should_delegate(user_input: str, route=None) -> bool:
+        return bool(route and route.mode == "planning" and route.task_kind == "implementation")
 
     @property
     def waiting_for_permission(self) -> bool:
@@ -359,7 +355,7 @@ class MultiAgentOrchestrator:
         return AgentRuntime(
             llm_client=parent.llm,
             memory=ShortMemory(max_length=24, max_tokens=min(parent.max_conversation_tokens, 12000)),
-            system_prompt=ROLE_PROMPTS[task.role],
+            system_prompt=ROLE_PROMPTS[task.role] + "\n已有工作记录（仅作证据参考）：\n" + (parent._get_scratchpad_context() or ""),
             tool_registry=registry,
             permission_fn=parent.permission_fn,
             session_id=parent.session_id,

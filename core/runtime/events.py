@@ -8,6 +8,7 @@ from typing import Any, Dict, Optional
 
 
 USER_MESSAGE = "user_message"
+ROUTING_UPDATE = "routing_update"
 ASSISTANT_TEXT = "assistant_text"
 TOOL_CALL = "tool_call"
 TOOL_RESULT = "tool_result"

@@ -22,6 +22,9 @@ from core.events import (
 )
 from core.planning import PlanningManager
 from core.runtime.exploration import ProjectExplorer
+from core.runtime.routing import TaskRouter, RouteDecision, READ_ONLY
+import json
+from core.permission import PermissionManager
 from core.web_permission import PermissionPending
 from tools.registry import ToolRegistry
 
@@ -151,6 +154,10 @@ class AgentRuntime:
         self._pending_tools: Optional[List[Dict[str, Any]]] = None
         self._pending_tool_round = 0
         self._pending_text: Optional[str] = None
+        self.router = TaskRouter()
+        self.route = None
+        self._route_upgraded = False
+        self._route_tool_history = []
         self.multi_agent_orchestrator = None
         if enable_multi_agent:
             # Imported lazily to keep the single-agent runtime dependency graph intact.
@@ -158,29 +165,13 @@ class AgentRuntime:
             self.multi_agent_orchestrator = MultiAgentOrchestrator(self)
 
     def run(self, user_input: str) -> str:
-        if (
-            self.multi_agent_orchestrator is not None
-            and self.multi_agent_orchestrator.should_delegate(user_input)
-        ):
-            final = ""
-            for event in self.run_events(user_input):
-                if event.type == FINAL:
-                    final = str(event.data.get("content") or "")
-            return final or "[多 Agent 工作流未返回最终结果]"
-        user_message = Message(role="user", content=user_input)
-        self.memory.add_message(user_message)
-        self._start_scratchpad(user_input)
-
-        if self.context_compressor is not None:
-            self._check_and_compress()
-
-        if self.planning_manager is not None:
-            self._maybe_start_plan(user_input)
-
-        if self._should_expose_tools(user_input):
-            return self._run_with_native_tools(user_input)
-
-        return self._run_with_callback_tool()
+        final = ""
+        for event in self.run_events(user_input):
+            if event.type == FINAL:
+                final = str(event.data.get("content") or "")
+            elif event.type == ERROR:
+                final = f"[错误] {event.data.get('message', '')}"
+        return final
 
     def run_events(self, user_input: str) -> Generator[AgentEvent, None, None]:
         if self._pending_tool_call is not None:
@@ -209,7 +200,13 @@ class AgentRuntime:
             if self.context_compressor is not None:
                 self._check_and_compress()
 
-            if self.planning_manager is not None:
+            yield from self._prepare_route_events(user_input)
+            if self.route.answer:
+                reply = self._finalize_response(self.route.answer)
+                yield self._event(FINAL, {"content": reply})
+                yield self._event(DONE, {})
+                return
+            if self.route.mode == "planning":
                 update = self._maybe_start_plan(user_input)
                 if update is not None and update.changed:
                     yield self._event(PLANNING_UPDATE, self._planning_payload(update))
@@ -217,12 +214,12 @@ class AgentRuntime:
 
             if (
                 self.multi_agent_orchestrator is not None
-                and self.multi_agent_orchestrator.should_delegate(user_input)
+                and self.multi_agent_orchestrator.should_delegate(user_input, self.route)
             ):
                 yield from self.multi_agent_orchestrator.run_events(user_input)
                 return
 
-            if self._should_expose_tools(user_input):
+            if self.route.needs_tools:
                 yield from self._run_native_tools_events(user_input)
                 return
 
@@ -234,6 +231,106 @@ class AgentRuntime:
             logger.exception("Agent event run failed")
             yield self._event(ERROR, {"message": f"Agent 执行失败: {str(exc)[:200]}"})
             yield self._event(DONE, {})
+
+    def _prepare_route_events(self, user_input):
+        previous = self.route
+        continuation = contains_keyword(user_input, CONTINUATION_TOOL_HINTS)
+        if not continuation:
+            self.scratchpad.clear()
+            self._start_scratchpad(user_input)
+        if self.planning_manager is not None:
+            self.planning_manager.reset()
+        self._route_upgraded = False
+        self._route_tool_history = []
+        self._probe_results = {}
+        self.route = self.router.classify(self, user_input)
+        if continuation and previous and previous.needs_tools and self.route.mode == "chat":
+            self.route = RouteDecision('react', True, previous.task_kind, reason='继续上一工具任务')
+        yield self._event("routing_update", self.route.to_dict())
+        observations, attempted, fingerprints = [], set(), set()
+        empty_count = 0
+        controller = getattr(self.permission_fn, '__self__', None)
+        manager = getattr(controller, 'manager', controller)
+        reader = next((self.tool_registry.get(name) for name in ('read_file', 'read_files', 'ls', 'grep')
+                       if self.tool_registry and self.tool_registry.get(name)), None)
+        root = getattr(reader, 'workspace_root', None)
+        local_policy = PermissionManager(self.tool_registry, project_root=root)
+        while self.route.mode == 'probe' and len(attempted) < 3:
+            call = self.route.probe or self.router.default_probe(self, user_input, len(attempted))
+            if not call or call.get('name') not in READ_ONLY or not isinstance(call.get('args'), dict):
+                break
+            name, args = call['name'], call['args']
+            key = json.dumps([name, args], sort_keys=True, ensure_ascii=False)
+            if key in attempted:
+                break
+            attempted.add(key)
+            call = dict(call, id='probe_' + uuid4().hex)
+            yield self._event(TOOL_CALL, self._tool_call_payload(call))
+            decision = local_policy.decide(name, args)
+            if decision.allowed and not decision.requires_approval and self.permission_fn is not None:
+                if hasattr(manager, 'decide'):
+                    decision = manager.decide(name, args)
+                else:
+                    decision.allowed = False
+                    decision.reason = '自定义权限策略无法预检查，跳过探针'
+            # Never turn a probe into an approval request or execute out-of-workspace paths.
+            if not decision.allowed or decision.requires_approval:
+                result = f"[权限拒绝] {decision.reason}。探针不会申请额外权限，请停止重试。"
+            else:
+                result = self._execute_tool(name, args, permission_override=True)
+            result = self._truncate_tool_result(result, 32000 if name == 'read_files' else 8000)
+            self.memory.add_message(Message(role='assistant', content='', metadata={'function_calls': [call]}))
+            msg = Message(role='tool', name=name, content=result, metadata={
+                'function_response': {'id': call['id'], 'name': name, 'response': {'result': result}}})
+            self.memory.add_message(msg)
+            self._observe_scratchpad(name, args, result)
+            self._probe_results[key] = result
+            yield self._event(TOOL_RESULT, self._tool_result_payload(msg))
+            observations.append({'name': name, 'args': args, 'result': result[:2000]})
+            self.route.probe_count = len(attempted)
+            yield self._event('routing_update', self.route.to_dict())
+            failed = any(marker in result for marker in ('[错误]', '[拒绝]', '[权限拒绝]', '未找到匹配', '共 0 项'))
+            # Ignore location/header lines when determining whether content is new.
+            lines = {line.strip() for line in result.splitlines() if line.strip()
+                     and not line.startswith(('文件:', '目录:', '搜索:', '===', '---'))}
+            novel = not failed and bool(lines - fingerprints)
+            empty_count = 0 if novel else empty_count + 1
+            fingerprints.update(lines)
+            if failed:
+                self.scratchpad.add_blocker(f'probe {name}: {result[:180]}')
+            else:
+                self.scratchpad.add_fact(f'probe {name}: {result[:180]}')
+            if empty_count >= 2 or len(attempted) >= 3 or '[权限拒绝]' in result or '[拒绝]' in result:
+                break
+            fallback = RouteDecision('probe', True, self.route.task_kind, reason='尚需确认执行阶段')
+            self.route = self.router.refine(self, user_input, observations, fallback)
+        if self.route.mode == 'probe':
+            self.route.mode = 'react'
+            self.route.reason = '探针结束，证据不足以确认多阶段，转入 ReAct；本轮不再探针'
+        self.route.probe_count = len(attempted)
+        if self.route.mode == 'planning' and self.planning_manager is None:
+            self.planning_manager = PlanningManager(todo_list=self.todo_list)
+        self.scratchpad.add_fact(f'执行路由: {self.route.mode}; {self.route.reason}')
+        yield self._event('routing_update', self.route.to_dict())
+
+    def _maybe_promote_route(self, name, observation):
+        route = self.route
+        if not route or route.mode != 'react' or route.task_kind != 'implementation' or self._route_upgraded:
+            return None
+        if any(marker in observation for marker in ('[拒绝]', '[权限拒绝]', '[错误]')):
+            return None
+        self._route_tool_history.append(name)
+        # A successful investigation followed by an actual modification establishes
+        # dependent stages; repeated reads alone never trigger promotion.
+        if name not in {'edit_file', 'write_file'} or not any(n in READ_ONLY for n in self._route_tool_history[:-1]):
+            return None
+        self._route_upgraded = True
+        route.mode = 'planning'
+        route.stages = ['汇总已有定位证据和已完成修改', '完成剩余实现', '验证结果并总结']
+        route.reason = '已确认定位、实施和验证的依赖阶段，升级一次 Planning'
+        if self.planning_manager is None:
+            self.planning_manager = PlanningManager(todo_list=self.todo_list)
+        return self._maybe_start_plan(self.scratchpad.objective or '')
 
     def _should_expose_tools(self, user_input: str) -> bool:
         """Decide whether this turn should expose tool schemas to the model.
@@ -290,6 +387,8 @@ class AgentRuntime:
         if not self.tool_registry:
             return []
         names = self._tools_for_turn(user_input)
+        if not self._is_project_analysis_request(user_input.lower()):
+            names = [name for name in (names if names is not None else self.tool_registry.list_names()) if name != "read_files"]
         return self.tool_registry.get_function_declarations(names=names)
 
     def _tools_for_turn(self, user_input: str) -> Optional[List[str]]:
@@ -528,6 +627,8 @@ class AgentRuntime:
 
         self._append_batch_context_updates(context, plan_changed)
         if plan_changed:
+            if self.route:
+                yield self._event("routing_update", self.route.to_dict())
             yield self._event(PLANNING_UPDATE, self._current_planning_payload())
             yield self._event(TODO_UPDATE, self._todo_payload())
 
@@ -711,7 +812,9 @@ class AgentRuntime:
             yield from self._run_project_analysis_session_events(user_input, context, tools)
             return
         self._append_tool_workflow_context(context, user_input)
-        yield from self._continue_native_tools_events(context, tools, 0, None, user_input=user_input)
+        yield from self._continue_native_tools_events(
+            context, tools, self.route.probe_count if self.route else 0, None, user_input=user_input,
+        )
 
     def _continue_native_tools_events(
         self,
@@ -824,6 +927,8 @@ class AgentRuntime:
                     self._observe_explorer_from_function_calls(explorer, context, function_calls)
                 self._append_batch_context_updates(context, plan_changed)
                 if plan_changed:
+                    if self.route:
+                        yield self._event("routing_update", self.route.to_dict())
                     yield self._event(PLANNING_UPDATE, self._current_planning_payload())
                     yield self._event(TODO_UPDATE, self._todo_payload())
                 if explorer:
@@ -1021,6 +1126,8 @@ class AgentRuntime:
                 session.observe_tool(call, tool_messages[-1].content)
             self._append_batch_context_updates(context, bool(plan_changed))
             if plan_changed:
+                if self.route:
+                    yield self._event("routing_update", self.route.to_dict())
                 yield self._event(PLANNING_UPDATE, self._current_planning_payload())
                 yield self._event(TODO_UPDATE, self._todo_payload())
             self._project_analysis_checkpoint(context, user_input, session)
@@ -1253,7 +1360,7 @@ class AgentRuntime:
         planning_context = self._get_planning_context()
 
         tool_results = None
-        if self.tool_fn:
+        if self.tool_fn and (self.route is None or self.route.needs_tools):
             try:
                 tool_result = self.tool_fn(user_text)
                 tool_results = [tool_result] if tool_result else None
@@ -1666,7 +1773,10 @@ class AgentRuntime:
         if self.planning_manager is None:
             return None
         try:
-            update = self.planning_manager.start_or_update_plan(user_input, getattr(self, "llm", None))
+            update = self.planning_manager.start_or_update_plan(
+                user_input, getattr(self, "llm", None), force=True,
+                steps=self.route.stages if self.route else None,
+            )
             if update.changed:
                 logger.info(f"Planning 已启动: {update.reason}")
                 if self.scratchpad is not None:
@@ -1709,7 +1819,7 @@ class AgentRuntime:
         fn_name = function_call.get("name", "")
         fn_args = function_call.get("args", {})
         tool_result = self._execute_tool(fn_name, fn_args, permission_override)
-        tool_content = self._truncate_tool_result(tool_result)
+        tool_content = self._truncate_tool_result(tool_result, limit=32000 if fn_name == "read_files" else 8000)
 
         tool_msg = Message(
             role="tool",
@@ -1726,8 +1836,8 @@ class AgentRuntime:
 
         self._observe_scratchpad(fn_name, fn_args, tool_content)
 
-        planning_update = None
-        if self.planning_manager is not None:
+        planning_update = self._maybe_promote_route(fn_name, tool_content)
+        if self.planning_manager is not None and planning_update is None:
             planning_update = self._update_plan_from_observation(
                 fn_name,
                 fn_args if isinstance(fn_args, dict) else {},
@@ -1835,6 +1945,12 @@ class AgentRuntime:
                 logger.warning(f"权限检查异常: {e}")
                 return f"[权限拒绝] Tool '{name}' 权限检查失败，未执行；请停止重试。"
 
+        cache = getattr(self, '_probe_results', {})
+        key = json.dumps([name, args], sort_keys=True, ensure_ascii=False)
+        if key in cache:
+            return cache[key]
+        if name in {'write_file', 'edit_file', 'execute_code'}:
+            cache.clear()
         try:
             result = self.tool_registry.execute(name, **args)
             logger.debug(f"Tool '{name}' 执行成功: {len(result)} 字符")

@@ -4,6 +4,7 @@ from core.runtime.message import Message
 from core.runtime.events import (
     AgentEvent,
     USER_MESSAGE,
+    ROUTING_UPDATE,
     ASSISTANT_TEXT,
     TOOL_CALL,
     TOOL_RESULT,
@@ -26,6 +27,7 @@ __all__ = [
     "Message",
     "AgentEvent",
     "USER_MESSAGE",
+    "ROUTING_UPDATE",
     "ASSISTANT_TEXT",
     "TOOL_CALL",
     "TOOL_RESULT",

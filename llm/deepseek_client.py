@@ -74,6 +74,17 @@ class DeepSeekClient:
         )
         return parsed
 
+    def generate_routing(self, messages: List[Message]) -> dict:
+        """One small routing request, with a short timeout and no retries."""
+        payload = self._build_payload(messages, None, None)
+        payload["max_tokens"] = 600
+        payload["response_format"] = {"type": "json_object"}
+        response = self._call_api(payload, timeout=10)
+        parsed = self._parse_response(response)
+        self._record_usage(response, estimated_prompt_tokens=self._estimate_payload_tokens(payload),
+                           estimated_completion_tokens=Message.estimate_tokens(parsed.get("text") or ""))
+        return parsed
+
     def stream_generate(
         self,
         messages: List[Message],

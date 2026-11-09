@@ -195,7 +195,7 @@ def main():
     print("=" * 55)
     print(f"  模型: deepseek-chat | 上下文: 128K")
     print(f"  工具: {'✅ 启用' if use_tools else '❌ 禁用'}  |  RAG: {'✅ 启用' if use_rag else '❌ 禁用'}")
-    print(f"  多 Agent: {'✅ 启用' if use_multi_agent else '❌ 禁用'}（复杂执行任务才会委派）")
+    print(f"  多 Agent: {'✅ 启用' if use_multi_agent else '❌ 禁用'}（多阶段实施任务才会委派）")
 
     project_ctx = ProjectContext(os.path.join(project_root, "AGENT.md"))
     if project_ctx.is_loaded:
@@ -204,8 +204,8 @@ def main():
     print()
     print("  输入对话内容，/exit 退出，/clear 清空记忆")
     print("  /todo show | add <描述> | start <序号> | done <序号> [结果] | block <序号> [原因]")
-    print("  复杂任务会先进入 Planning 模式，再在执行中持续重规划")
-    print("  --multi-agent 会让复杂执行任务依次交给 Explore、Implement、Test，再由主管汇总")
+    print("  先判断工具需求：单步 ReAct，多阶段 Planning，不确定时最多 3 次只读探针")
+    print("  --multi-agent 会让 Planning 实施任务依次交给 Explore、Implement、Test，再由主管汇总")
     if use_rag:
         print("  💡 RAG 示例问题: '这个项目采用什么架构？'")
     print("=" * 55)

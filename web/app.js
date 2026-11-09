@@ -934,6 +934,10 @@ function handleEvent(event) {
   switch (event.type) {
     case "user_message":
       break;
+    case "routing_update":
+      showThinking(data.mode === "probe" ? "Inspecting task scope" : `Mode: ${data.mode}`);
+      upsertActivityItem({ id: "routing", kind: "event", title: `Mode: ${data.mode}`, detail: `${data.reason || ""} (${data.probe_count || 0}/3 probes)`, status: data.mode === "probe" ? "running" : "done" });
+      break;
     case "assistant_text":
       state.pendingAssistantText = data.content || "";
       state.lastAssistantText = state.pendingAssistantText;

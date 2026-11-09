@@ -69,6 +69,11 @@ class Scratchpad:
         observation_text = self._normalize(observation, self.max_item_chars)
         path = args.get("path") or args.get("directory") or args.get("root")
 
+        if tool_name == "read_files":
+            for item in args.get("files", []):
+                if isinstance(item, dict) and item.get("path"):
+                    self.add_file(str(item["path"]), "batch read attempted")
+
         if tool_name in {"read_file", "write_file", "edit_file"} and path:
             self.add_file(str(path), self._tool_note(tool_name, observation_text))
         elif tool_name in {"ls", "grep"}:
@@ -82,7 +87,10 @@ class Scratchpad:
 
         if self._looks_like_error(observation_text):
             self.add_blocker(f"{tool_name}: {observation_text}")
-            self.add_next_step("根据最新错误或权限结果调整方案并重新验证")
+            if "拒绝" in observation_text or "没有读取权限" in observation_text:
+                self.add_next_step("该目标不可访问；停止重试或绕过，使用其他已授权证据")
+            else:
+                self.add_next_step("根据最新错误调整方案并重新验证")
         elif tool_name in {"write_file", "edit_file", "execute_code"}:
             self.add_next_step("运行测试或静态检查验证最新修改")
 
@@ -112,7 +120,7 @@ class Scratchpad:
     def format_for_prompt(self) -> Optional[str]:
         if self.is_empty():
             return None
-
+        
         lines = []
         if self.objective:
             lines.append(f"目标: {self.objective}")
