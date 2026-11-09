@@ -41,7 +41,7 @@ from core.permission import PermissionManager
 from core.compression import ContextCompressor
 from llm.deepseek_client import DeepSeekClient
 from tools.registry import ToolRegistry
-from tools.file_tool import FileReadTool, FileWriteTool
+from tools.file_tool import FileReadTool, FileWriteTool, ReadFilesTool
 from tools.code_executor import CodeExecutorTool
 from tools.web_search import WebSearchTool
 from tools.project_tools import LSTool, GrepTool, EditTool
@@ -109,8 +109,9 @@ def build_runtime(use_tools: bool = False, use_rag: bool = False, use_multi_agen
     if use_tools:
         registry = ToolRegistry()
         registry.register(FileReadTool(workspace_root=project_root))
+        registry.register(ReadFilesTool(workspace_root=project_root))
         registry.register(FileWriteTool(workspace_root=project_root))
-        registry.register(CodeExecutorTool())
+        registry.register(CodeExecutorTool(workspace_root=project_root))
         registry.register(WebSearchTool())
         registry.register(LSTool(workspace_root=project_root))
         registry.register(GrepTool(workspace_root=project_root))

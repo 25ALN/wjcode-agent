@@ -21,7 +21,7 @@ from core.runtime import AgentRuntime
 from core.todo_store import TodoStore
 from core.web_permission import WebPermissionController
 from tools.code_executor import CodeExecutorTool
-from tools.file_tool import FileReadTool, FileWriteTool
+from tools.file_tool import FileReadTool, FileWriteTool, ReadFilesTool
 from tools.project_tools import EditTool, GrepTool, LSTool
 from tools.registry import ToolRegistry
 from tools.todo_tool import TodoUpdateTool
@@ -498,6 +498,7 @@ class AgentSessionManager:
     def _build_registry(todo, todo_store: TodoStore, workspace_root: str) -> ToolRegistry:
         registry = ToolRegistry()
         registry.register(FileReadTool(workspace_root=workspace_root))
+        registry.register(ReadFilesTool(workspace_root=workspace_root))
         registry.register(FileWriteTool(workspace_root=workspace_root))
         registry.register(CodeExecutorTool(workspace_root=workspace_root))
         registry.register(WebSearchTool())

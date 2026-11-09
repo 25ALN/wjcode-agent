@@ -2,7 +2,7 @@ import os
 import logging
 from typing import Optional
 from tools.base_tool import BaseTool, SAFE, CAUTION
-from tools.security import path_security_reason
+from tools.security import is_inside_workspace, path_security_reason, resolve_path
 
 logger = logging.getLogger(__name__)
 
@@ -176,6 +176,110 @@ class FileReadTool(BaseTool):
         if os.path.isabs(path):
             return os.path.abspath(path)
         return os.path.abspath(os.path.join(self.workspace_root, path))
+
+
+class ReadFilesTool(BaseTool):
+    """Read several workspace files in one project-analysis tool call.
+
+    Each item is checked and rendered independently.  A protected or
+    out-of-workspace item therefore cannot block ordinary source files in the
+    same batch, and it never becomes an approval opportunity.
+    """
+
+    name = "read_files"
+    risk_level = SAFE
+    MAX_FILES = 8
+    MAX_OUTPUT_CHARS = 32_000
+    description = (
+        "批量读取项目内多个普通文件，仅用于项目分析。"
+        "敏感文件、系统路径、工作区外路径和无读取权限的文件会逐项拒绝。"
+        "每次最多 8 个文件，总输出最多 32000 字符。"
+    )
+    parameters = {
+        "type": "object",
+        "properties": {
+            "files": {
+                "type": "array",
+                "description": "要读取的文件请求列表，最多 8 项。",
+                "maxItems": MAX_FILES,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "相对于工作区的文件路径。"},
+                        "start_line": {"type": "integer", "minimum": 1},
+                        "end_line": {"type": "integer", "minimum": 1},
+                    },
+                    "required": ["path"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        "required": ["files"],
+        "additionalProperties": False,
+    }
+
+    def __init__(self, workspace_root: Optional[str] = None):
+        self.workspace_root = os.path.abspath(workspace_root or os.getcwd())
+        self._single_reader = FileReadTool(workspace_root=self.workspace_root)
+
+    def execute(self, files: list[dict], **kwargs) -> str:
+        if not isinstance(files, list) or not files:
+            return "[错误] read_files 需要至少一个文件请求。"
+        if len(files) > self.MAX_FILES:
+            return f"[错误] read_files 一次最多读取 {self.MAX_FILES} 个文件。"
+
+        requests = []
+        seen = set()
+        for item in files:
+            if not isinstance(item, dict) or not isinstance(item.get("path"), str):
+                requests.append((None, "[错误] 文件请求必须包含字符串 path。"))
+                continue
+            path = item["path"]
+            start_line = item.get("start_line")
+            end_line = item.get("end_line")
+            key = (path, start_line, end_line)
+            if key in seen:
+                continue
+            seen.add(key)
+            requests.append((
+                {"path": path, "start_line": start_line, "end_line": end_line},
+                None,
+            ))
+
+        if not requests:
+            return "[错误] 没有有效的文件请求。"
+
+        parts = [f"[批量读取] 请求 {len(requests)} 项，最多返回 {self.MAX_OUTPUT_CHARS} 字符。"]
+        used = len(parts[0]) + 1
+        for index, (request, validation_error) in enumerate(requests, 1):
+            if request is None:
+                content = validation_error
+                label = "<invalid>"
+            else:
+                path = request["path"]
+                label = path
+                resolved = resolve_path(path, self.workspace_root)
+                if not is_inside_workspace(resolved, self.workspace_root):
+                    content = (
+                        "[拒绝] 项目分析批量读取仅允许工作区内文件: "
+                        f"{resolved}。请停止重试。"
+                    )
+                else:
+                    content = self._single_reader.execute(**request)
+
+            section = f"\n=== 文件: {label} ===\n{content}\n"
+            remaining = self.MAX_OUTPUT_CHARS - used
+            if remaining <= 0:
+                parts.append("[提示] 批量输出已达到 32000 字符上限，后续文件未展开。")
+                break
+            if len(section) > remaining:
+                marker = "\n[提示] 批量输出已截断。"
+                parts.append(section[:max(0, remaining - len(marker))] + marker[:remaining])
+                break
+            parts.append(section)
+            used += len(section)
+
+        return "".join(parts)
 
 
 class FileWriteTool(BaseTool):

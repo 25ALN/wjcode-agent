@@ -62,7 +62,7 @@ PROJECT_ANALYSIS_MUTATION_KEYWORDS = (
     "修改", "修复", "新增", "添加", "删除", "重构", "写入", "编辑",
     "运行", "测试", "调试", "复现", "执行",
 )
-PROJECT_ANALYSIS_READ_TOOLS = ("ls", "grep", "read_file")
+PROJECT_ANALYSIS_READ_TOOLS = ("ls", "grep", "read_file", "read_files")
 FRESH_INFO_TIME_KEYWORDS = (
     "今天", "明天", "后天", "上午", "下午", "今晚", "早上", "中午", "晚上",
     "本周", "周一", "周二", "周三", "周四", "周五", "周六", "周日",
@@ -990,7 +990,7 @@ class AgentRuntime:
         session = ProjectExplorer(user_input)
         available_tools = self._registered_project_read_tools()
         if not available_tools:
-            yield self._event(ERROR, {"message": "项目分析需要 ls/grep/read_file 工具，但当前没有可用只读项目工具"})
+            yield self._event(ERROR, {"message": "项目分析需要 ls/grep/read_file/read_files 工具，但当前没有可用只读项目工具"})
             yield self._event(DONE, {})
             return
 

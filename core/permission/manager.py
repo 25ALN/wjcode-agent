@@ -7,6 +7,7 @@ operations, and blocks dangerous actions when configured to do so.
 from __future__ import annotations
 
 import os
+import logging
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
@@ -30,8 +31,9 @@ RISK_ORDER = {
     DANGEROUS: 2,
 }
 
-PATH_AWARE_TOOLS = {"read_file", "write_file", "edit_file", "ls", "grep"}
+PATH_AWARE_TOOLS = {"read_file", "read_files", "write_file", "edit_file", "ls", "grep"}
 WORKSPACE_WRITE_TOOLS = {"write_file", "edit_file"}
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -68,6 +70,13 @@ class PermissionManager:
     def approve(self, tool_name: str, args: dict) -> bool:
         self.last_denial_reason = ""
         decision = self.decide(tool_name, args)
+        logger.debug(
+            "Permission decision tool=%s risk=%s allowed=%s requires_approval=%s",
+            tool_name,
+            decision.risk_level,
+            decision.allowed,
+            decision.requires_approval,
+        )
         if not decision.allowed:
             self.last_denial_reason = decision.reason
             self.output_fn(self._format_block_message(decision))
@@ -106,6 +115,14 @@ class PermissionManager:
         path_decision = self._check_paths(tool_name, args)
         if path_decision is not None:
             return path_decision
+
+        if tool_name == "read_files":
+            return PermissionDecision(
+                tool_name=tool_name,
+                risk_level=SAFE,
+                allowed=True,
+                reason="批量只读请求由工具逐项检查，无需确认",
+            )
 
         if risk_level == SAFE:
             return PermissionDecision(

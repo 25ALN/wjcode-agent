@@ -1,6 +1,6 @@
 from tools.base_tool import BaseTool
 from tools.registry import ToolRegistry
-from tools.file_tool import FileReadTool, FileWriteTool
+from tools.file_tool import FileReadTool, FileWriteTool, ReadFilesTool
 from tools.code_executor import CodeExecutorTool
 from tools.web_search import WebSearchTool
 from tools.project_tools import LSTool, GrepTool, EditTool
@@ -10,6 +10,7 @@ __all__ = [
     "BaseTool",
     "ToolRegistry",
     "FileReadTool",
+    "ReadFilesTool",
     "FileWriteTool",
     "CodeExecutorTool",
     "WebSearchTool",

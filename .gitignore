@@ -71,3 +71,5 @@ Thumbs.db
 *.swo
 *~
 promote.txt
+zj/
+permission_checks.py

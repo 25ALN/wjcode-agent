@@ -186,6 +186,16 @@ class CoverageTracker:
             if "." in os.path.basename(path):
                 self.visited_files.add(path)
 
+        batch_files = args.get("files") if isinstance(args.get("files"), list) else []
+        for spec in batch_files:
+            if not isinstance(spec, dict):
+                continue
+            batch_path = str(spec.get("path") or "").strip().replace("\\", "/")
+            if batch_path:
+                self.visited_paths.add(batch_path)
+                if "." in os.path.basename(batch_path):
+                    self.visited_files.add(batch_path)
+
         for found in self.extract_paths(content):
             self.visited_paths.add(found)
             if "." in os.path.basename(found):
@@ -264,12 +274,40 @@ class SearchPlanner:
                 continue
             self.current_target = target
             checklist.mark_searching(target)
-            for tool_name, args in self.plans.get(target, ()):
+            plan_items = self.plans.get(target, ())
+            for plan_index, (tool_name, args) in enumerate(plan_items):
                 if tool_name not in available:
                     continue
                 key = self._tool_key(target, tool_name, args)
                 if key in self.attempted:
                     continue
+
+                # Consecutive planned file reads are one analysis operation.
+                # This avoids a permission round-trip for every source file.
+                if tool_name == "read_file" and "read_files" in available:
+                    batch = []
+                    batch_keys = []
+                    for candidate_name, candidate_args in plan_items[plan_index:]:
+                        if candidate_name != "read_file":
+                            break
+                        candidate_key = self._tool_key(target, candidate_name, candidate_args)
+                        if candidate_key in self.attempted:
+                            continue
+                        batch.append(dict(candidate_args))
+                        batch_keys.append(candidate_key)
+                        if len(batch) >= 8:
+                            break
+                    if len(batch) >= 2:
+                        for batch_key in batch_keys:
+                            self.attempted.add(batch_key)
+                        checklist.add_attempt(target)
+                        self.next_target = self._find_next_target(checklist, after=target)
+                        return {
+                            "name": "read_files",
+                            "args": {"files": batch},
+                            "analysis_target": target,
+                        }
+
                 self.attempted.add(key)
                 checklist.add_attempt(target)
                 self.next_target = self._find_next_target(checklist, after=target)
@@ -464,6 +502,35 @@ class AnalysisSession:
         self.tool_results.append(text[:5000])
 
         symbols = self.coverage_tracker.update(target, tool_name, args, text)
+        if tool_name == "read_files":
+            sections = self._batch_sections(text)
+            successful = 0
+            batch_files = args.get("files") if isinstance(args.get("files"), list) else []
+            for spec in batch_files:
+                if not isinstance(spec, dict):
+                    continue
+                path = str(spec.get("path") or "").strip()
+                section = sections.get(path, "")
+                if not section or self._is_low_information_result(section):
+                    continue
+                self.evidence_store.add(EvidenceItem(
+                    target=target,
+                    tool_name=tool_name,
+                    args=dict(spec),
+                    path=path,
+                    content=section[:5000],
+                    symbols=self.coverage_tracker.extract_symbols(section),
+                ))
+                successful += 1
+            if successful:
+                self.checklist.add_evidence(
+                    target,
+                    complete=self._target_has_enough_evidence(target, call),
+                )
+            else:
+                self.checklist.skip_if_empty(target)
+            return
+
         if self._is_low_information_result(text):
             self.checklist.skip_if_empty(target)
             return
@@ -481,28 +548,45 @@ class AnalysisSession:
         self.checklist.add_evidence(target, complete=self._target_has_enough_evidence(target, call))
 
     @staticmethod
+    def _batch_sections(text: str) -> Dict[str, str]:
+        sections: Dict[str, str] = {}
+        pattern = re.compile(
+            r"^=== 文件: (.*?) ===\n(.*?)(?=^=== 文件: |\Z)",
+            flags=re.MULTILINE | re.DOTALL,
+        )
+        for match in pattern.finditer(str(text or "")):
+            sections[match.group(1).strip()] = match.group(2).strip()
+        return sections
+
+    @staticmethod
     def _target_has_enough_evidence(target: str, call: Dict[str, Any]) -> bool:
         tool_name = str(call.get("name") or "")
         args = call.get("args") if isinstance(call.get("args"), dict) else {}
         path = str(args.get("path") or args.get("file_path") or "").replace("\\", "/").lower()
+        if tool_name == "read_files":
+            batch_files = args.get("files") if isinstance(args.get("files"), list) else []
+            path = " ".join(
+                str(item.get("path") or "").replace("\\", "/").lower()
+                for item in batch_files if isinstance(item, dict)
+            )
         if target == "Architecture":
             return tool_name == "ls"
         if target == "Runtime":
-            return tool_name in {"read_file", "grep"} and ("agent_runtime.py" in path or tool_name == "grep")
+            return tool_name in {"read_file", "read_files", "grep"} and ("agent_runtime.py" in path or tool_name == "grep")
         if target == "Planning":
-            return tool_name in {"read_file", "grep"} and ("planning" in path or "todo" in path or tool_name == "grep")
+            return tool_name in {"read_file", "read_files", "grep"} and ("planning" in path or "todo" in path or tool_name == "grep")
         if target == "Memory":
-            return tool_name in {"read_file", "grep"} and ("memory" in path or tool_name == "grep")
+            return tool_name in {"read_file", "read_files", "grep"} and ("memory" in path or tool_name == "grep")
         if target == "Context":
-            return tool_name in {"read_file", "grep"} and ("context" in path or tool_name == "grep")
+            return tool_name in {"read_file", "read_files", "grep"} and ("context" in path or tool_name == "grep")
         if target == "Prompt":
-            return tool_name == "read_file"
+            return tool_name in {"read_file", "read_files"}
         if target in {"Permission", "Tool", "Server", "Web", "RAG", "Tests", "Deployment", "CLI"}:
-            return tool_name in {"read_file", "grep"}
-        return tool_name in {"read_file", "grep"}
+            return tool_name in {"read_file", "read_files", "grep"}
+        return tool_name in {"read_file", "read_files", "grep"}
 
     def ready_for_summary(self) -> bool:
-        return not self.checklist.missing_required() and not self.has_more_search(("ls", "grep", "read_file"))
+        return not self.checklist.missing_required() and not self.has_more_search(("ls", "grep", "read_file", "read_files"))
 
     def missing_for_final(self) -> List[str]:
         missing = self.checklist.missing_required()
